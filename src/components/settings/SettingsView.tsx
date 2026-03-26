@@ -1,0 +1,1129 @@
+import { useMemo, useRef, useState } from "react";
+import { Download, Trash2 } from "lucide-react";
+import { downloadExpensesCsv, type CsvLookup } from "@/lib/exportCsv";
+import { Button } from "@/components/ui/button";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectItemText,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { CategoryGlyph } from "@/components/expense/FinanceGlyphs";
+import { ColorBadge } from "@/components/expense/ColorBadge";
+import { IconPicker } from "@/components/settings/IconPicker";
+import { useAssets } from "@/context/AssetsContext";
+import { useBudgets } from "@/context/BudgetContext";
+import { useExpenses } from "@/context/ExpensesContext";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
+import { downloadExpensesXlsx, type XlsxLookup } from "@/lib/exportXlsx";
+import {
+  downloadEmptyImportCsvTemplate,
+  parseExpensesCsv,
+} from "@/lib/importCsv";
+import {
+  ALL_TIME_EXPORT,
+  collectYearMonthsFromExpenses,
+  formatYearMonth,
+  hebrewMonthYearLabel,
+  type YearMonth,
+} from "@/lib/month";
+import { useI18n } from "@/context/I18nContext";
+import { cn } from "@/lib/utils";
+import { formatNumericInput, parseNumericInput } from "@/utils/formatters";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
+import { SortableSettingsCategoryList } from "@/components/settings/SortableSettingsCategoryList";
+import { useAuth } from "@/context/AuthContext";
+import { supabase } from "@/lib/supabase";
+
+export function SettingsView() {
+  const { lang, setLang, t, dir } = useI18n();
+  const { user, profile, signOut, refreshProfile } = useAuth();
+  const { getBudget, setBudget, clearAllUserData: clearBudgetData } =
+    useBudgets();
+  const {
+    clearAllUserData: clearAssetsData,
+    assetTypes,
+    addAssetType,
+    updateAssetType,
+    deleteAssetType,
+  } = useAssets();
+  const {
+    expenses,
+    expenseCategories,
+    incomeSources,
+    destinationAccounts,
+    paymentMethods,
+    currencies,
+    addManagedCurrency,
+    removeManagedCurrency,
+    importData,
+    clearAllUserData: clearExpensesData,
+    updateExpenseCategory,
+    deleteExpenseCategory,
+    reorderExpenseCategories,
+    reorderIncomeSources,
+    updateIncomeSource,
+    deleteIncomeSource,
+  } = useExpenses();
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deleteId, setDeleteId] = useState<string | null>(null);
+  const [moveToId, setMoveToId] = useState<string>("");
+  const [deleteIncomeOpen, setDeleteIncomeOpen] = useState(false);
+  const [deleteIncomeId, setDeleteIncomeId] = useState<string | null>(null);
+  const [moveToIncomeId, setMoveToIncomeId] = useState<string>("");
+  const [exportPeriod, setExportPeriod] = useState<
+    YearMonth | typeof ALL_TIME_EXPORT
+  >(ALL_TIME_EXPORT);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [showAllBudgetSettings, setShowAllBudgetSettings] = useState(false);
+  const [assetTypesOpen, setAssetTypesOpen] = useState(false);
+  const [newAssetTypeName, setNewAssetTypeName] = useState("");
+  const [assetDeleteOpen, setAssetDeleteOpen] = useState(false);
+  const [assetDeleteId, setAssetDeleteId] = useState<string | null>(null);
+  const [moveAssetTypeTo, setMoveAssetTypeTo] = useState("");
+  const [showAllExpenseCategoriesSettings, setShowAllExpenseCategoriesSettings] =
+    useState(false);
+  const [showAllIncomeCategoriesSettings, setShowAllIncomeCategoriesSettings] =
+    useState(false);
+  const [showAllAssetTypesSettings, setShowAllAssetTypesSettings] = useState(false);
+  const [newCurrencyCode, setNewCurrencyCode] = useState("");
+  const [joinHouseholdId, setJoinHouseholdId] = useState("");
+  const [joinLoading, setJoinLoading] = useState(false);
+
+  const csvLookup = useMemo<CsvLookup>(
+    () => ({
+      categoryName(type, id) {
+        const list = type === "income" ? incomeSources : expenseCategories;
+        return list.find((c) => c.id === id)?.name ?? id;
+      },
+      paymentName(type, id) {
+        const list =
+          type === "income" ? destinationAccounts : paymentMethods;
+        return list.find((p) => p.id === id)?.name ?? id;
+      },
+    }),
+    [expenseCategories, incomeSources, destinationAccounts, paymentMethods],
+  );
+
+  const sorted = useMemo(() => [...expenseCategories], [expenseCategories]);
+
+  const expenseCountByCategory = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const e of expenses) {
+      if (e.type !== "expense") continue;
+      m.set(e.categoryId, (m.get(e.categoryId) ?? 0) + 1);
+    }
+    return m;
+  }, [expenses]);
+
+  const incomeCountByCategory = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const e of expenses) {
+      if (e.type !== "income") continue;
+      m.set(e.categoryId, (m.get(e.categoryId) ?? 0) + 1);
+    }
+    return m;
+  }, [expenses]);
+
+  const sortedIncome = useMemo(() => [...incomeSources], [incomeSources]);
+
+  const budgetRowsVisible = useMemo(() => {
+    if (showAllBudgetSettings || sorted.length <= 5) return sorted;
+    return sorted.slice(0, 5);
+  }, [sorted, showAllBudgetSettings]);
+
+  const exportMonthOptions = useMemo(() => {
+    const cur = formatYearMonth(new Date());
+    const from = collectYearMonthsFromExpenses(expenses.map((e) => e.date));
+    const uniq = new Set<YearMonth>([cur, ...from]);
+    return [...uniq].sort((a, b) => b.localeCompare(a));
+  }, [expenses]);
+
+  const xlsxLookup = useMemo<XlsxLookup>(
+    () => ({
+      categoryName(type, id) {
+        const list = type === "income" ? incomeSources : expenseCategories;
+        return list.find((c) => c.id === id)?.name ?? id;
+      },
+      paymentName(type, id) {
+        const list =
+          type === "income" ? destinationAccounts : paymentMethods;
+        return list.find((p) => p.id === id)?.name ?? id;
+      },
+    }),
+    [expenseCategories, incomeSources, destinationAccounts, paymentMethods],
+  );
+
+  function exportRowsForPeriod() {
+    return exportPeriod === ALL_TIME_EXPORT
+      ? expenses
+      : expenses.filter((e) => e.date.startsWith(exportPeriod));
+  }
+
+  function onExportXlsx() {
+    const rows = exportRowsForPeriod();
+    const suffix =
+      exportPeriod === ALL_TIME_EXPORT ? "kol-hazman" : exportPeriod;
+    downloadExpensesXlsx(
+      rows,
+      `expandy-hozaot-${suffix}.xlsx`,
+      currencies,
+      xlsxLookup,
+    );
+  }
+
+  function onExportCsv() {
+    const rows = exportRowsForPeriod();
+    const suffix =
+      exportPeriod === ALL_TIME_EXPORT ? "kol-hazman" : exportPeriod;
+    downloadExpensesCsv(rows, `expandy-hozaot-${suffix}.csv`, csvLookup);
+  }
+
+  function onDownloadTemplate() {
+    downloadEmptyImportCsvTemplate();
+  }
+
+  function onPickCsvFile() {
+    fileInputRef.current?.click();
+  }
+
+  function onCsvFileSelected(file: File | null) {
+    if (!file) return;
+    if (!file.name.toLowerCase().endsWith(".csv")) {
+      window.alert("נא לבחור קובץ CSV תקין (.csv).");
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onerror = () => {
+      window.alert("לא הצלחנו לקרוא את הקובץ. נסו שוב.");
+    };
+    reader.onload = () => {
+      try {
+        const text = String(reader.result ?? "");
+        const { rows, missingHeaders, errors } = parseExpensesCsv(text);
+        if (missingHeaders.length) {
+          window.alert(
+            `קובץ ה-CSV לא בפורמט הנכון. חסרים העמודות: ${missingHeaders.join(", ")}`,
+          );
+          return;
+        }
+        if (errors.length) {
+          window.alert(`שגיאת CSV: ${errors[0]}`);
+        }
+
+        if (!rows.length) {
+          window.alert("לא נמצאו שורות תקינות לייבוא. בדקו את הקובץ.");
+          return;
+        }
+        const res = importData(rows);
+        window.alert(
+          `הייבוא הושלם: ${res.imported} שורות נוספות. ${
+            res.skipped ? `(${res.skipped} שורות נדחו)` : ""
+          }${res.newCategories ? ` · נוספו ${res.newCategories} קטגוריות` : ""}${
+            res.newMethods ? ` · נוספו ${res.newMethods} אמצעי תשלום/חשבונות` : ""
+          }`,
+        );
+      } catch {
+        window.alert("אירעה שגיאה בזמן ייבוא. נסו קובץ אחר.");
+      } finally {
+        if (fileInputRef.current) fileInputRef.current.value = "";
+      }
+    };
+
+    reader.readAsText(file, "utf-8");
+  }
+
+  async function onClearAllData() {
+    await clearExpensesData();
+    clearAssetsData();
+    clearBudgetData();
+    window.alert(t.clearAllDataSuccess);
+    window.location.reload();
+  }
+
+  async function onCopyHouseholdId() {
+    const id = profile?.household_id?.trim();
+    if (!id) return;
+    try {
+      await navigator.clipboard.writeText(id);
+      window.alert(lang === "he" ? "מזהה משק הבית הועתק." : "Household ID copied.");
+    } catch {
+      window.alert(id);
+    }
+  }
+
+  async function onJoinHousehold() {
+    const nextId = joinHouseholdId.trim();
+    if (!nextId || !user?.id) return;
+    setJoinLoading(true);
+    const { error } = await supabase
+      .from("profiles")
+      .update({ household_id: nextId })
+      .eq("id", user.id);
+    setJoinLoading(false);
+    if (error) {
+      window.alert(
+        lang === "he"
+          ? `הצטרפות למשק הבית נכשלה: ${error.message}`
+          : `Failed to join household: ${error.message}`,
+      );
+      return;
+    }
+    await refreshProfile();
+    setJoinHouseholdId("");
+    window.alert(
+      lang === "he"
+        ? "הצטרפת בהצלחה למשק הבית. הנתונים המשותפים יתרעננו כעת."
+        : "Joined household successfully. Shared data will refresh now.",
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-6">
+      <Card className="border-border/80 shadow-none">
+        <CardHeader className="space-y-1">
+          <CardTitle>{t.settingsTitle}</CardTitle>
+          <CardDescription>{t.settingsSubtitleLead}</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <div className="space-y-1 rounded-lg border border-border/70 px-3 py-2">
+            <p className="text-xs text-muted-foreground">Email</p>
+            <p className="text-sm">{user?.email ?? "-"}</p>
+          </div>
+          <div className="space-y-1 rounded-lg border border-border/70 px-3 py-2">
+            <p className="text-xs text-muted-foreground">
+              {lang === "he" ? "מזהה משק בית" : "Household ID"}
+            </p>
+            <div className="flex items-center justify-between gap-2 text-right">
+              <p className="text-sm">{profile?.household_id ?? "-"}</p>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                onClick={() => void onCopyHouseholdId()}
+                disabled={!profile?.household_id}
+              >
+                {lang === "he" ? "העתק" : "Copy"}
+              </Button>
+            </div>
+          </div>
+          <div className="space-y-2 rounded-lg border border-border/70 px-3 py-3">
+            <p className="text-xs text-muted-foreground">
+              {lang === "he" ? "הצטרפות למשק בית קיים" : "Join Household"}
+            </p>
+            <div className="flex gap-2">
+              <Input
+                value={joinHouseholdId}
+                onChange={(e) => setJoinHouseholdId(e.target.value)}
+                placeholder={lang === "he" ? "הכנס מזהה משק בית" : "Enter household ID"}
+              />
+              <Button
+                type="button"
+                onClick={() => void onJoinHousehold()}
+                disabled={joinLoading || !joinHouseholdId.trim() || !user?.id}
+              >
+                {joinLoading
+                  ? lang === "he"
+                    ? "מצטרף..."
+                    : "Joining..."
+                  : lang === "he"
+                    ? "הצטרפות למשק בית קיים"
+                    : "Join Household"}
+              </Button>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              {lang === "he"
+                ? profile?.household_id
+                  ? "מצב סנכרון: פעיל ומחובר"
+                  : "מצב סנכרון: לא מחובר"
+                : profile?.household_id
+                  ? `Household Active: Linked (#${profile.household_id})`
+                  : "Household Active: Not linked"}
+            </p>
+          </div>
+          <Button type="button" variant="outline" onClick={() => void signOut()}>
+            Logout
+          </Button>
+        </CardContent>
+      </Card>
+
+      <Card className="border-border/80 shadow-none">
+        <CardHeader className="space-y-1">
+          <CardTitle className="text-base">
+            {lang === "he" ? "שפה" : "Language"}
+          </CardTitle>
+          <CardDescription>
+            {lang === "he"
+              ? "בחירת שפת ממשק וכיוון כתיבה (RTL/LTR)."
+              : "Choose UI language and writing direction (RTL/LTR)."}
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-2">
+          <Label htmlFor="lang">{lang === "he" ? "שפה" : "Language"}</Label>
+          <Select value={lang} onValueChange={(v) => setLang(v as "he" | "en")}>
+            <SelectTrigger id="lang" className="w-full">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent position="popper">
+              <SelectItem value="he" textValue="עברית">
+                <SelectItemText>עברית</SelectItemText>
+              </SelectItem>
+              <SelectItem value="en" textValue="English">
+                <SelectItemText>English</SelectItemText>
+              </SelectItem>
+            </SelectContent>
+          </Select>
+        </CardContent>
+      </Card>
+
+      <Card className="border-border/80 shadow-none">
+        <CardHeader className="space-y-1">
+          <CardTitle className="text-base">
+            {lang === "he" ? "מטבעות מנוהלים" : "Managed Currencies"}
+          </CardTitle>
+          <CardDescription>
+            {lang === "he"
+              ? "הוספה/הסרה של קודי מטבע שישמשו בבחירת מטבע בטפסים."
+              : "Add/remove currency codes used across selectors."}
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <div className="flex gap-2">
+            <Input
+              value={newCurrencyCode}
+              onChange={(e) => setNewCurrencyCode(e.target.value.toUpperCase())}
+              placeholder="USD"
+              dir="ltr"
+            />
+            <Button
+              type="button"
+              onClick={() => {
+                const code = addManagedCurrency(newCurrencyCode);
+                if (!code) return;
+                setNewCurrencyCode("");
+              }}
+            >
+              {t.add}
+            </Button>
+          </div>
+          <div className="space-y-2">
+            {currencies.map((c) => {
+              const isBuiltin = ["ILS", "USD", "EUR", "GBP"].includes(c.code);
+              return (
+                <div
+                  key={c.code}
+                  className="flex items-center justify-between rounded-lg border border-border/60 px-3 py-2"
+                >
+                  <span className="text-sm tabular-nums">{c.code}</span>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    disabled={isBuiltin}
+                    onClick={() => removeManagedCurrency(c.code)}
+                  >
+                    {t.deleteCategory}
+                  </Button>
+                </div>
+              );
+            })}
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card className="border-border/80 shadow-none">
+        <CardHeader className="space-y-1">
+          <CardTitle className="text-base">{t.exportCsv}</CardTitle>
+          <CardDescription>{t.settingsExportDescription}</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4 p-5">
+          <div className="space-y-2">
+            <Label htmlFor="export-period">{t.exportPeriodLabel}</Label>
+            <Select
+              value={exportPeriod}
+              onValueChange={(v) =>
+                setExportPeriod(
+                  v === ALL_TIME_EXPORT ? ALL_TIME_EXPORT : (v as YearMonth),
+                )
+              }
+            >
+              <SelectTrigger id="export-period" className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent position="popper">
+                <SelectItem
+                  value={ALL_TIME_EXPORT}
+                  textValue={t.exportAllTime}
+                >
+                  <SelectItemText>{t.exportAllTime}</SelectItemText>
+                </SelectItem>
+                {exportMonthOptions.map((k) => (
+                  <SelectItem
+                    key={k}
+                    value={k}
+                    textValue={hebrewMonthYearLabel(k)}
+                  >
+                    <SelectItemText>{hebrewMonthYearLabel(k)}</SelectItemText>
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap">
+            <Button
+              type="button"
+              variant="outline"
+              className="w-full gap-2 sm:w-auto"
+              onClick={onExportXlsx}
+            >
+              <Download className="size-4" aria-hidden />
+              {t.exportCsv}
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              className="w-full gap-2 sm:w-auto"
+              onClick={onExportCsv}
+            >
+              <Download className="size-4" aria-hidden />
+              {t.exportCsvDownload}
+            </Button>
+          </div>
+
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".csv,text/csv"
+              className="hidden"
+              onChange={(e) => onCsvFileSelected(e.target.files?.[0] ?? null)}
+            />
+            <div className="flex items-center gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                className="gap-2"
+                onClick={onPickCsvFile}
+              >
+                ייבוא נתונים
+              </Button>
+              <button
+                type="button"
+                className="text-sm text-muted-foreground hover:text-foreground underline"
+                onClick={onDownloadTemplate}
+              >
+                הורדת תבנית ריקה
+              </button>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card className="border-border/80 shadow-none">
+        <CardHeader className="space-y-1">
+          <CardTitle className="text-base">{t.manageCategories}</CardTitle>
+          <CardDescription>{t.manageCategoriesDesc}</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <SortableSettingsCategoryList
+            categories={sorted}
+            showAll={showAllExpenseCategoriesSettings}
+            visibleCount={5}
+            onReorder={reorderExpenseCategories}
+            dragLabel={t.settingsDragReorderCategory}
+            renderItem={(c, handle) => (
+              <>
+                <div className="flex items-center justify-between gap-3">
+                  <div className="flex min-w-0 items-center gap-2">
+                    {handle}
+                    <CategoryGlyph iconKey={c.iconKey} className="size-4" />
+                    <ColorBadge color={c.color} />
+                    <span className="min-w-0 truncate text-sm font-medium">
+                      {c.name}
+                    </span>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-2">
+                    <input
+                      type="color"
+                      value={c.color}
+                      onChange={(e) =>
+                        updateExpenseCategory(c.id, { color: e.target.value })
+                      }
+                      className="h-9 w-10 cursor-pointer rounded-md border border-border bg-transparent p-1"
+                      aria-label={`Pick color — ${c.name}`}
+                    />
+                    <Dialog>
+                      <DialogTrigger asChild>
+                        <Button type="button" variant="outline" size="sm">
+                          {t.pickIcon}
+                        </Button>
+                      </DialogTrigger>
+                      <DialogContent dir={lang === "he" ? "rtl" : "ltr"}>
+                        <DialogHeader>
+                          <DialogTitle>{t.pickIcon}</DialogTitle>
+                          <DialogDescription>{c.name}</DialogDescription>
+                        </DialogHeader>
+                        <IconPicker
+                          value={c.iconKey}
+                          onChange={(k) =>
+                            updateExpenseCategory(c.id, { iconKey: k })
+                          }
+                        />
+                      </DialogContent>
+                    </Dialog>
+                    {sorted.length > 1 ? (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="icon"
+                        aria-label={t.deleteCategory}
+                        onClick={() => {
+                          const count = expenseCountByCategory.get(c.id) ?? 0;
+                          if (count <= 0) {
+                            if (!window.confirm(t.deleteCategoryConfirm)) return;
+                            deleteExpenseCategory(c.id);
+                            return;
+                          }
+                          setDeleteId(c.id);
+                          const fallback =
+                            sorted.find((x) => x.id !== c.id)?.id ?? "";
+                          setMoveToId(fallback);
+                          setDeleteOpen(true);
+                        }}
+                      >
+                        <Trash2 className="size-4" aria-hidden />
+                      </Button>
+                    ) : null}
+                  </div>
+                </div>
+                <div className="mt-3">
+                  <Label htmlFor={`cat-name-${c.id}`} className="sr-only">
+                    {t.categoryNameLabel}
+                  </Label>
+                  <Input
+                    id={`cat-name-${c.id}`}
+                    value={c.name}
+                    onChange={(e) =>
+                      updateExpenseCategory(c.id, { name: e.target.value })
+                    }
+                  />
+                </div>
+              </>
+            )}
+          />
+          {sorted.length > 5 ? (
+            <div className="border-t border-border/50 pt-2">
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="w-full text-xs text-muted-foreground"
+                onClick={() =>
+                  setShowAllExpenseCategoriesSettings((v) => !v)
+                }
+              >
+                {showAllExpenseCategoriesSettings
+                  ? t.dashboardShowLessCategories
+                  : t.dashboardShowAllCategories}
+              </Button>
+            </div>
+          ) : null}
+        </CardContent>
+      </Card>
+
+      <Card className="border-border/80 shadow-none">
+        <CardHeader className="space-y-1">
+          <CardTitle className="text-base">ניהול קטגוריות הכנסה</CardTitle>
+          <CardDescription>
+            עריכה, שינוי אייקון/צבע ומחיקה של קטגוריות הכנסה.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <SortableSettingsCategoryList
+            categories={sortedIncome}
+            showAll={showAllIncomeCategoriesSettings}
+            visibleCount={5}
+            onReorder={reorderIncomeSources}
+            dragLabel={t.settingsDragReorderIncome}
+            renderItem={(c, handle) => (
+              <>
+                <div className="flex items-center justify-between gap-3">
+                  <div className="flex min-w-0 items-center gap-2">
+                    {handle}
+                    <CategoryGlyph iconKey={c.iconKey} className="size-4" />
+                    <ColorBadge color={c.color} />
+                    <span className="min-w-0 truncate text-sm font-medium">
+                      {c.name}
+                    </span>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-2">
+                    <input
+                      type="color"
+                      value={c.color}
+                      onChange={(e) =>
+                        updateIncomeSource(c.id, { color: e.target.value })
+                      }
+                      className="h-9 w-10 cursor-pointer rounded-md border border-border bg-transparent p-1"
+                      aria-label={`Pick color — ${c.name}`}
+                    />
+                    <Dialog>
+                      <DialogTrigger asChild>
+                        <Button type="button" variant="outline" size="sm">
+                          {t.pickIcon}
+                        </Button>
+                      </DialogTrigger>
+                      <DialogContent dir={lang === "he" ? "rtl" : "ltr"}>
+                        <DialogHeader>
+                          <DialogTitle>{t.pickIcon}</DialogTitle>
+                          <DialogDescription>{c.name}</DialogDescription>
+                        </DialogHeader>
+                        <IconPicker
+                          value={c.iconKey}
+                          onChange={(k) => updateIncomeSource(c.id, { iconKey: k })}
+                        />
+                      </DialogContent>
+                    </Dialog>
+                    {sortedIncome.length > 1 ? (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="icon"
+                        aria-label={t.deleteCategory}
+                        onClick={() => {
+                          const count = incomeCountByCategory.get(c.id) ?? 0;
+                          if (count <= 0) {
+                            if (!window.confirm(t.deleteCategoryConfirm)) return;
+                            deleteIncomeSource(c.id);
+                            return;
+                          }
+                          setDeleteIncomeId(c.id);
+                          const fallback =
+                            sortedIncome.find((x) => x.id !== c.id)?.id ?? "";
+                          setMoveToIncomeId(fallback);
+                          setDeleteIncomeOpen(true);
+                        }}
+                      >
+                        <Trash2 className="size-4" aria-hidden />
+                      </Button>
+                    ) : null}
+                  </div>
+                </div>
+                <div className="mt-3">
+                  <Label htmlFor={`inc-name-${c.id}`} className="sr-only">
+                    {t.categoryNameLabel}
+                  </Label>
+                  <Input
+                    id={`inc-name-${c.id}`}
+                    value={c.name}
+                    onChange={(e) =>
+                      updateIncomeSource(c.id, { name: e.target.value })
+                    }
+                  />
+                </div>
+              </>
+            )}
+          />
+          {sortedIncome.length > 5 ? (
+            <div className="border-t border-border/50 pt-2">
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="w-full text-xs text-muted-foreground"
+                onClick={() =>
+                  setShowAllIncomeCategoriesSettings((v) => !v)
+                }
+              >
+                {showAllIncomeCategoriesSettings
+                  ? t.dashboardShowLessCategories
+                  : t.dashboardShowAllCategories}
+              </Button>
+            </div>
+          ) : null}
+        </CardContent>
+      </Card>
+
+      <Card className="border-border/80 shadow-none">
+        <CardHeader className="space-y-1">
+          <CardTitle className="text-base">{t.manageAssetTypes}</CardTitle>
+          <CardDescription>{t.manageAssetTypesDesc}</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <Dialog
+            open={assetTypesOpen}
+            onOpenChange={(o) => {
+              setAssetTypesOpen(o);
+              if (!o) setShowAllAssetTypesSettings(false);
+            }}
+          >
+            <DialogTrigger asChild>
+              <Button type="button" variant="outline" className="w-full">
+                {t.manageAssetTypes}
+              </Button>
+            </DialogTrigger>
+            <DialogContent dir={dir}>
+              <DialogHeader>
+                <DialogTitle>{t.manageAssetTypes}</DialogTitle>
+                <DialogDescription>{t.manageAssetTypesDesc}</DialogDescription>
+              </DialogHeader>
+              <div className="space-y-4">
+                <div className="space-y-2">
+                  <Label htmlFor="settings-asset-type-new">{t.assetTypeNameLabel}</Label>
+                  <div className="flex gap-2">
+                    <Input
+                      id="settings-asset-type-new"
+                      value={newAssetTypeName}
+                      onChange={(e) => setNewAssetTypeName(e.target.value)}
+                      placeholder={t.promptNewAssetType}
+                    />
+                    <Button
+                      type="button"
+                      onClick={() => {
+                        const id = addAssetType(newAssetTypeName);
+                        if (id) setNewAssetTypeName("");
+                      }}
+                    >
+                      {t.addAssetType}
+                    </Button>
+                  </div>
+                </div>
+
+                <ul className="space-y-2">
+                  {(showAllAssetTypesSettings || assetTypes.length <= 5
+                    ? assetTypes
+                    : assetTypes.slice(0, 5)
+                  ).map((type) => (
+                    <li key={type.id} className="rounded-lg border border-border/70 p-3">
+                      <div className="flex items-center gap-2">
+                        <Input
+                          value={type.name}
+                          onChange={(e) =>
+                            updateAssetType(type.id, e.target.value)
+                          }
+                        />
+                        {assetTypes.length > 1 ? (
+                          <Button
+                            type="button"
+                            variant="outline"
+                            onClick={() => {
+                              setAssetDeleteId(type.id);
+                              const fallback =
+                                assetTypes.find((x) => x.id !== type.id)?.id ?? "";
+                              setMoveAssetTypeTo(fallback);
+                              setAssetDeleteOpen(true);
+                            }}
+                          >
+                            {t.deleteAssetType}
+                          </Button>
+                        ) : null}
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+                {assetTypes.length > 5 ? (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className="w-full text-xs text-muted-foreground"
+                    onClick={() =>
+                      setShowAllAssetTypesSettings((v) => !v)
+                    }
+                  >
+                    {showAllAssetTypesSettings
+                      ? t.dashboardShowLessCategories
+                      : t.dashboardShowAllCategories}
+                  </Button>
+                ) : null}
+              </div>
+            </DialogContent>
+          </Dialog>
+        </CardContent>
+      </Card>
+
+      <Card className="border-border/80 shadow-none">
+        <CardHeader className="space-y-1 px-4 pb-2 pt-4">
+          <CardTitle className="text-base">{t.settingsBudgetsSection}</CardTitle>
+          <CardDescription className="text-xs">
+            {t.settingsBudgetsSectionDesc}
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="p-5">
+          <ul
+            className="divide-y divide-border/50 rounded-xl border border-border/60 bg-muted/10"
+            dir={dir}
+          >
+            {budgetRowsVisible.map((c) => {
+              const amount = getBudget(c.id);
+              const tint =
+                /^#[0-9a-fA-F]{6}$/.test(c.color.trim()) ? `${c.color}1A` : undefined;
+              return (
+                <li key={c.id} style={tint ? { backgroundColor: tint } : undefined}>
+                  <div className="flex min-h-[2.75rem] items-center justify-between gap-3 px-4 py-2">
+                    <div className="flex min-w-0 flex-1 items-center gap-2.5">
+                      <CategoryGlyph
+                        iconKey={c.iconKey}
+                        className="size-4 shrink-0 text-muted-foreground"
+                      />
+                      <span className="truncate text-sm font-medium leading-tight">
+                        {c.name}
+                      </span>
+                    </div>
+                    <input
+                      id={`budget-${c.id}`}
+                      type="text"
+                      inputMode="decimal"
+                      dir="ltr"
+                      value={formatNumericInput(Number.isFinite(amount) ? String(amount) : "0")}
+                      onChange={(e) => {
+                        const raw = e.target.value;
+                        if (raw.trim() === "") {
+                          setBudget(c.id, 0);
+                          return;
+                        }
+                        const n = parseNumericInput(raw);
+                        if (n != null && Number.isFinite(n) && n >= 0) setBudget(c.id, n);
+                      }}
+                      aria-label={`${t.settingsBudgetLabel} — ${c.name}`}
+                      className={cn(
+                        "w-[6rem] shrink-0 rounded-md border-0 border-b border-transparent bg-transparent py-1.5 text-end text-sm tabular-nums text-foreground transition-colors",
+                        "placeholder:text-muted-foreground/50",
+                        "hover:bg-muted/30 hover:border-border/50",
+                        "focus:border-primary focus:bg-muted/30 focus:outline-none focus:ring-0",
+                      )}
+                    />
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+          {sorted.length > 5 ? (
+            <div className="border-t border-border/50 px-4 py-2">
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="w-full text-xs text-muted-foreground"
+                onClick={() => setShowAllBudgetSettings((v) => !v)}
+              >
+                {showAllBudgetSettings
+                  ? t.dashboardShowLessCategories
+                  : t.dashboardShowAllCategories}
+              </Button>
+            </div>
+          ) : null}
+          <p className="border-t border-border/50 px-4 py-3 text-xs text-muted-foreground">
+            {t.settingsSaveNote}
+          </p>
+        </CardContent>
+      </Card>
+
+      <Card className="border-destructive/40 shadow-none">
+        <CardHeader className="space-y-1">
+          <CardTitle className="text-base text-destructive">
+            {t.settingsDangerZone}
+          </CardTitle>
+          <CardDescription>{t.settingsDangerZoneDesc}</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <AlertDialog>
+            <AlertDialogTrigger asChild>
+              <Button
+                type="button"
+                variant="destructive"
+                className="w-full sm:w-auto"
+              >
+                {t.clearAllData}
+              </Button>
+            </AlertDialogTrigger>
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle>האם אתה בטוח?</AlertDialogTitle>
+                <AlertDialogDescription>
+                  פעולה זו תמחק את כל הנתונים ולא ניתנת לביטול.
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel>ביטול</AlertDialogCancel>
+                <AlertDialogAction onClick={onClearAllData}>
+                  {t.clearAllData}
+                </AlertDialogAction>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
+        </CardContent>
+      </Card>
+
+      <AlertDialog open={deleteOpen} onOpenChange={setDeleteOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {lang === "he"
+                ? "יש תנועות בקטגוריה"
+                : "This category has transactions"}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {lang === "he"
+                ? "לאן להעביר אותן לפני המחיקה?"
+                : "Where should we move them before deleting?"}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <div className="space-y-2">
+            <Label htmlFor="move-to">
+              {lang === "he" ? "העבר לקטגוריה" : "Move to category"}
+            </Label>
+            <Select value={moveToId} onValueChange={setMoveToId}>
+              <SelectTrigger id="move-to" className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent position="popper">
+                {sorted
+                  .filter((c) => c.id !== deleteId)
+                  .map((c) => (
+                    <SelectItem key={c.id} value={c.id} textValue={c.name}>
+                      <SelectItemText>{c.name}</SelectItemText>
+                    </SelectItem>
+                  ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <AlertDialogFooter>
+            <AlertDialogCancel>{t.cancel}</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                if (!deleteId || !moveToId) return;
+                deleteExpenseCategory(deleteId, moveToId);
+                setDeleteOpen(false);
+              }}
+            >
+              {t.deleteCategory}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={assetDeleteOpen} onOpenChange={setAssetDeleteOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {lang === "he" ? "מחיקת סוג נכס" : "Delete asset type"}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {lang === "he"
+                ? "נכסים מסוג זה יועברו לסוג היעד לפני המחיקה."
+                : "Accounts of this type will move to the target type before deletion."}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <div className="space-y-2">
+            <Label htmlFor="move-asset-type">
+              {lang === "he" ? "העבר לסוג" : "Move to type"}
+            </Label>
+            <Select value={moveAssetTypeTo} onValueChange={setMoveAssetTypeTo}>
+              <SelectTrigger id="move-asset-type" className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent position="popper" className="z-[10050]">
+                {assetTypes
+                  .filter((x) => x.id !== assetDeleteId)
+                  .map((x) => (
+                    <SelectItem key={x.id} value={x.id} textValue={x.name}>
+                      <SelectItemText>{x.name}</SelectItemText>
+                    </SelectItem>
+                  ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <AlertDialogFooter>
+            <AlertDialogCancel>{t.cancel}</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                if (!assetDeleteId || !moveAssetTypeTo) return;
+                deleteAssetType(assetDeleteId, moveAssetTypeTo);
+                setAssetDeleteOpen(false);
+              }}
+            >
+              {t.deleteAssetType}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={deleteIncomeOpen} onOpenChange={setDeleteIncomeOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {lang === "he"
+                ? "יש תנועות בקטגוריית ההכנסה"
+                : "This income category has transactions"}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {lang === "he"
+                ? "לאן להעביר אותן לפני המחיקה?"
+                : "Where should we move them before deleting?"}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <div className="space-y-2">
+            <Label htmlFor="move-to-income">
+              {lang === "he" ? "העבר לקטגוריית הכנסה" : "Move to income category"}
+            </Label>
+            <Select value={moveToIncomeId} onValueChange={setMoveToIncomeId}>
+              <SelectTrigger id="move-to-income" className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent position="popper">
+                {sortedIncome
+                  .filter((c) => c.id !== deleteIncomeId)
+                  .map((c) => (
+                    <SelectItem key={c.id} value={c.id} textValue={c.name}>
+                      <SelectItemText>{c.name}</SelectItemText>
+                    </SelectItem>
+                  ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <AlertDialogFooter>
+            <AlertDialogCancel>{t.cancel}</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                if (!deleteIncomeId || !moveToIncomeId) return;
+                deleteIncomeSource(deleteIncomeId, moveToIncomeId);
+                setDeleteIncomeOpen(false);
+              }}
+            >
+              {t.deleteCategory}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </div>
+  );
+}
