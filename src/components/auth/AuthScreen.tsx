@@ -4,6 +4,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useAuth } from "@/context/AuthContext";
+import { supabase } from '../../lib/supabase';
 
 export function AuthScreen() {
   const { signIn, signUp } = useAuth();
@@ -31,6 +32,20 @@ export function AuthScreen() {
     (error.toLowerCase().includes("invalid login credentials") ||
       error.toLowerCase().includes("email not confirmed"));
 
+      const handleGoogleLogin = async () => {
+        const { error } = await supabase.auth.signInWithOAuth({
+          provider: 'google',
+          options: {
+            // מחזיר את המשתמש לדף הבית של האפליקציה אחרי הכניסה
+            redirectTo: window.location.origin, 
+          },
+        });
+        
+        if (error) {
+          console.error("שגיאה בהתחברות עם גוגל:", error.message);
+        }
+      };
+      
   return (
     <div className="mx-auto flex min-h-dvh w-full max-w-md items-center px-4">
       <Card className="w-full border-border/80 shadow-none">
@@ -96,6 +111,27 @@ export function AuthScreen() {
                 : "Already have an account? Login"}
             </Button>
           </form>
+          <div className="relative my-4">
+  <div className="absolute inset-0 flex items-center">
+    <span className="w-full border-t border-gray-300"></span>
+  </div>
+  <div className="relative flex justify-center text-xs uppercase">
+    <span className="bg-background px-2 text-muted-foreground">או המשך עם</span>
+  </div>
+</div>
+
+<button
+  type="button"
+  onClick={handleGoogleLogin}
+  className="w-full flex items-center justify-center gap-2 bg-white text-gray-700 border border-gray-300 py-2 px-4 rounded-lg hover:bg-gray-50 transition-colors shadow-sm"
+>
+  <img 
+    src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" 
+    alt="Google" 
+    className="w-5 h-5"
+  />
+  Google
+</button>
         </CardContent>
       </Card>
     </div>
