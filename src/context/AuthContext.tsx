@@ -228,19 +228,36 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const signUp = useCallback(
     async (email: string, password: string, householdId: string, isAdmin = false) => {
-      const { data, error } = await supabase.auth.signUp({
-        email: email.trim(),
-        password,
-      });
-      if (error) return error.message;
-      const nextUser = data.user;
-      if (nextUser) {
-        await ensureProfile(nextUser, householdId, isAdmin);
-        await refreshProfile();
+      try {
+        const { data, error } = await supabase.auth.signUp({
+          email: email.trim(),
+          password,
+        });
+        if (error) return error.message;
+
+        // If email confirmation is enabled, Supabase returns no session here.
+        // In that case RLS will block writing to `profiles` from the client (auth.uid() is null).
+        if (!data.session) {
+          return "Account created. Please confirm your email from the inbox, then log in.";
+        }
+
+        const nextUser = data.user;
+        if (!nextUser) return "Signup succeeded but no user was returned.";
+
+        try {
+          await ensureProfile(nextUser, householdId, isAdmin);
+        } catch (err) {
+          console.log("[Auth] ensureProfile during signup failed", err);
+          return "Signed up, but profile creation failed (likely RLS). Confirm email/login again, or fix Profiles RLS.";
+        }
+
+        return null;
+      } catch (err) {
+        console.log("[Auth] signUp crashed", err);
+        return "Signup failed due to a network or unexpected error. Please try again.";
       }
-      return null;
     },
-    [refreshProfile],
+    [],
   );
 
   const signOut = useCallback(async () => {

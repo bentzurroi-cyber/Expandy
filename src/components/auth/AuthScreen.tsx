@@ -15,16 +15,32 @@ export function AuthScreen() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  async function withTimeout<T>(p: Promise<T>, ms = 15000): Promise<T> {
+    return await Promise.race([
+      p,
+      new Promise<T>((_resolve, reject) =>
+        window.setTimeout(() => reject(new Error("Request timed out")), ms),
+      ),
+    ]);
+  }
+
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
     setLoading(true);
     setError(null);
-    const nextError =
-      mode === "login"
-        ? await signIn(email, password)
-        : await signUp(email, password, householdId, false);
-    setLoading(false);
-    setError(nextError);
+    try {
+      const nextError =
+        mode === "login"
+          ? await withTimeout(signIn(email, password))
+          : await withTimeout(signUp(email, password, householdId, false));
+      setError(nextError);
+    } catch (err) {
+      const msg =
+        err instanceof Error ? err.message : "Unknown error during authentication";
+      setError(msg);
+    } finally {
+      setLoading(false);
+    }
   }
 
   const showEmailConfirmHint =
