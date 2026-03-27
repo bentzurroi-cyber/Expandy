@@ -449,9 +449,13 @@ function newId(): string {
   }
 }
 
+function sleep(ms: number) {
+  return new Promise<void>((resolve) => window.setTimeout(resolve, ms));
+}
+
 export function ExpensesProvider({ children }: { children: ReactNode }) {
   const { mergeBudgetOnExpenseCategoryDeleted } = useBudgets();
-  const { user, profile } = useAuth();
+  const { user, profile, session, loading: authLoading } = useAuth();
   const [expenses, setExpenses] = useState<Expense[]>([]);
   const [expenseCategoryOverrides, setExpenseCategoryOverrides] = useState<
     Record<string, CategoryOverride>
@@ -527,6 +531,20 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
     readQuickAccessCount(),
   );
   const [supabaseStateReady, setSupabaseStateReady] = useState(false);
+
+  const waitForCloudContext = useCallback(async () => {
+    // On wake-up, auth/profile can lag briefly; wait before writing.
+    for (let i = 0; i < 16; i++) {
+      if (session && user?.id && profile?.household_id && !authLoading) {
+        return {
+          userId: user.id,
+          householdId: profile.household_id,
+        };
+      }
+      await sleep(250);
+    }
+    return null;
+  }, [authLoading, profile?.household_id, session, user?.id]);
 
   useEffect(() => {
     setSupabaseStateReady(false);
@@ -820,11 +838,18 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
 
   const addExpense = useCallback((input: Omit<Expense, "id">) => {
     const persistRow = (row: Expense) => {
-      if (!user?.id || !profile?.household_id) return;
-      void supabase.from("expenses").upsert({
+      void (async () => {
+        const cloud = await waitForCloudContext();
+        if (!cloud) {
+          console.error("[Expenses] Skipped cloud write (auth/session unavailable on wake-up)", {
+            expenseId: row.id,
+          });
+          return;
+        }
+        const { error } = await supabase.from("expenses").upsert({
         id: row.id,
-        user_id: user.id,
-        household_id: profile.household_id,
+        user_id: cloud.userId,
+        household_id: cloud.householdId,
         amount: row.amount,
         category: row.categoryId,
         date: row.date,
@@ -838,7 +863,11 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
           type: row.type,
         },
         is_recurring: row.recurringMonthly === true,
-      });
+        });
+        if (error) {
+          console.error("[Expenses] Cloud write failed", { expenseId: row.id, error: error.message });
+        }
+      })();
     };
     if (input.type === "expense" && input.recurringMonthly) {
       const count = Math.max(1, Math.floor(input.installments > 1 ? input.installments : 12));
@@ -887,7 +916,7 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
     const row = { ...input, id: newId() };
     setExpenses((prev) => [...prev, row]);
     persistRow(row);
-  }, [profile?.household_id, user?.id]);
+  }, [waitForCloudContext]);
 
   const materializeRecurringForMonth = useCallback(
     (ym: `${number}-${number}`) => {
@@ -1280,10 +1309,12 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
       setExpenses((prev) =>
         prev.map((e) => (e.id === id ? { ...e, ...patch } : e)),
       );
-      if (!user?.id || !profile?.household_id) return;
-      void supabase
-        .from("expenses")
-        .update({
+      void (async () => {
+        const cloud = await waitForCloudContext();
+        if (!cloud) return;
+        const { error } = await supabase
+          .from("expenses")
+          .update({
           amount: patch.amount,
           category: patch.categoryId,
           date: patch.date,
@@ -1299,27 +1330,36 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
           is_recurring: patch.recurringMonthly === true,
         })
         .eq("id", id)
-        .eq("household_id", profile.household_id);
+          .eq("household_id", cloud.householdId);
+        if (error) {
+          console.error("[Expenses] Cloud update failed", { expenseId: id, error: error.message });
+        }
+      })();
     },
-    [profile?.household_id, user?.id],
+    [waitForCloudContext],
   );
 
   const removeExpense = useCallback((id: string) => {
     setExpenses((prev) => prev.filter((e) => e.id !== id));
-    if (profile?.household_id) {
-      void supabase
+    void (async () => {
+      const cloud = await waitForCloudContext();
+      if (!cloud) return;
+      const { error } = await supabase
         .from("expenses")
         .delete()
         .eq("id", id)
-        .eq("household_id", profile.household_id);
-    }
+        .eq("household_id", cloud.householdId);
+      if (error) {
+        console.error("[Expenses] Cloud delete failed", { expenseId: id, error: error.message });
+      }
+    })();
     setRecurringIncomeSkips((prev) => {
       if (!prev[id]) return prev;
       const next = { ...prev };
       delete next[id];
       return next;
     });
-  }, [profile?.household_id]);
+  }, [waitForCloudContext]);
 
   const skipRecurringIncomePayment = useCallback(
     (templateId: string, ym: `${number}-${number}`) => {

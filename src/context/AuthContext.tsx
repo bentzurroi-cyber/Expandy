@@ -138,6 +138,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [profileError, setProfileError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const bootstrappedRef = useRef(false);
+  const authRefreshInFlightRef = useRef(false);
 
   const fetchProfileByUserId = useCallback(async (userId: string) => {
     console.log("[Auth] Profile fetch started", { userId });
@@ -220,6 +221,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   );
 
   const retryBootstrap = useCallback(async () => {
+    if (authRefreshInFlightRef.current) return;
+    authRefreshInFlightRef.current = true;
     setLoading(true);
     setProfileError(null);
     try {
@@ -232,10 +235,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         else setProfile(refreshed);
       }
     } catch (err) {
+      console.error("[Auth] retry bootstrap failed", err);
       setProfileError(
         err instanceof Error ? `Retry failed: ${err.message}` : "Retry failed",
       );
     } finally {
+      authRefreshInFlightRef.current = false;
       setLoading(false);
     }
   }, [applySession, fetchProfileByUserId]);
@@ -244,7 +249,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (bootstrappedRef.current) return;
     bootstrappedRef.current = true;
     let cancelled = false;
-    void (async () => {
+
+    const bootstrapSession = async (setUiLoading: boolean) => {
+      if (authRefreshInFlightRef.current) return;
+      authRefreshInFlightRef.current = true;
+      if (setUiLoading && !cancelled) {
+        setLoading(true);
+        setProfileError(null);
+      }
       try {
         const { data } = await supabase.auth.getSession();
         console.log("[Auth] getSession completed");
@@ -252,7 +264,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         await applySession(data.session);
       } catch (err) {
         console.error("[Auth] initial bootstrap failed", err);
-        if (!cancelled) {
+        if (!cancelled && setUiLoading) {
           setSession(null);
           setUser(null);
           setProfile(null);
@@ -261,12 +273,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           );
         }
       } finally {
-        if (!cancelled) setLoading(false);
+        authRefreshInFlightRef.current = false;
+        if (!cancelled && setUiLoading) setLoading(false);
       }
+    };
+
+    void (async () => {
+      await bootstrapSession(true);
     })();
+
     const { data: listener } = supabase.auth.onAuthStateChange(
       async (_event, nextSession) => {
         if (cancelled) return;
+        if (authRefreshInFlightRef.current) return;
+        authRefreshInFlightRef.current = true;
         setLoading(true);
         try {
           await applySession(nextSession);
@@ -280,12 +300,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             );
           }
         } finally {
+          authRefreshInFlightRef.current = false;
           if (!cancelled) setLoading(false);
         }
       },
     );
+
+    const onVisibilityChange = () => {
+      if (document.visibilityState !== "visible") return;
+      void bootstrapSession(false);
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+
     return () => {
       cancelled = true;
+      document.removeEventListener("visibilitychange", onVisibilityChange);
       listener.subscription.unsubscribe();
     };
   }, [applySession]);
