@@ -1335,11 +1335,13 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
     if (!cloud) {
       return { ok: false as const, error: "אין חיבור לחשבון. נסה שוב בעוד רגע." };
     }
-    const { error } = await supabase
+    const { data, error } = await supabase
       .from("expenses")
       .delete()
       .eq("id", id)
-      .eq("household_id", cloud.householdId);
+      .eq("household_id", cloud.householdId)
+      .select("id");
+    console.log("[History] Delete response:", { data, error });
     if (error) {
       console.error("[Expenses] Cloud delete failed", { expenseId: id, error: error.message });
       return { ok: false as const, error: `מחיקה מהענן נכשלה: ${error.message}` };
