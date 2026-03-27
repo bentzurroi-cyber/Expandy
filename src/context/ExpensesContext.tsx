@@ -382,7 +382,7 @@ type ExpensesContextValue = {
     id: string,
     patch: Partial<Omit<Expense, "id">>,
   ) => void;
-  removeExpense: (id: string) => void;
+  removeExpense: (id: string) => Promise<{ ok: true } | { ok: false; error: string }>;
   expenseCategories: Category[];
   incomeSources: Category[];
   /** Update income category (custom or builtin override). */
@@ -1330,26 +1330,28 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
     [waitForCloudContext],
   );
 
-  const removeExpense = useCallback((id: string) => {
+  const removeExpense = useCallback(async (id: string) => {
+    const cloud = await waitForCloudContext();
+    if (!cloud) {
+      return { ok: false as const, error: "אין חיבור לחשבון. נסה שוב בעוד רגע." };
+    }
+    const { error } = await supabase
+      .from("expenses")
+      .delete()
+      .eq("id", id)
+      .eq("household_id", cloud.householdId);
+    if (error) {
+      console.error("[Expenses] Cloud delete failed", { expenseId: id, error: error.message });
+      return { ok: false as const, error: `מחיקה מהענן נכשלה: ${error.message}` };
+    }
     setExpenses((prev) => prev.filter((e) => e.id !== id));
-    void (async () => {
-      const cloud = await waitForCloudContext();
-      if (!cloud) return;
-      const { error } = await supabase
-        .from("expenses")
-        .delete()
-        .eq("id", id)
-        .eq("household_id", cloud.householdId);
-      if (error) {
-        console.error("[Expenses] Cloud delete failed", { expenseId: id, error: error.message });
-      }
-    })();
     setRecurringIncomeSkips((prev) => {
       if (!prev[id]) return prev;
       const next = { ...prev };
       delete next[id];
       return next;
     });
+    return { ok: true as const };
   }, [waitForCloudContext]);
 
   const skipRecurringIncomePayment = useCallback(

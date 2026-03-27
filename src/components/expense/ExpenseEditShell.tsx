@@ -120,9 +120,13 @@ export function ExpenseEditShell({
     onOpenChange(false);
   }
 
-  function handleDelete() {
+  async function handleDelete() {
     if (!expense) return;
-    removeExpense(expense.id);
+    const res = await removeExpense(expense.id);
+    if (!res.ok) {
+      setHint(res.error);
+      return;
+    }
     onOpenChange(false);
   }
 
@@ -227,7 +231,7 @@ export function ExpenseEditShell({
             </AlertDialogHeader>
             <AlertDialogFooter>
               <AlertDialogCancel>{t.cancel}</AlertDialogCancel>
-              <AlertDialogAction onClick={handleDelete}>מחק</AlertDialogAction>
+              <AlertDialogAction onClick={() => void handleDelete()}>מחק</AlertDialogAction>
             </AlertDialogFooter>
           </AlertDialogContent>
         </AlertDialog>
