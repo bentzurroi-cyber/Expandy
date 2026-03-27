@@ -11,7 +11,7 @@ import { useAuth } from "@/context/AuthContext";
 import type { Expense } from "@/data/mock";
 
 export default function App() {
-  const { user, loading, retryBootstrap } = useAuth();
+  const { user, loading, retryBootstrap, profileError } = useAuth();
   const [view, setView] = useState<AppView>("entry");
   const [editing, setEditing] = useState<Expense | null>(null);
   const [historyPreset, setHistoryPreset] = useState<HistoryPreset>(null);
@@ -49,6 +49,11 @@ export default function App() {
 
   return (
     <>
+      {profileError ? (
+        <div className="mx-auto mt-2 w-full max-w-lg rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+          {profileError}
+        </div>
+      ) : null}
       <AppShell view={view} onViewChange={setView}>
         {view === "entry" ? (
           <EntryForm />

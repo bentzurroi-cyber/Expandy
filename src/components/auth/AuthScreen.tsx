@@ -48,6 +48,17 @@ export function AuthScreen() {
     (error.toLowerCase().includes("invalid login credentials") ||
       error.toLowerCase().includes("email not confirmed"));
 
+  const localizedError = (() => {
+    if (!error) return null;
+    const msg = error.toLowerCase();
+    if (msg.includes("invalid login credentials")) return "פרטי ההתחברות אינם נכונים";
+    if (msg.includes("please confirm your email") || msg.includes("email not confirmed")) {
+      return "יש לאשר את ההרשמה במייל";
+    }
+    if (msg.includes("request timed out")) return "הבקשה נמשכה יותר מדי זמן, נסו שוב";
+    return error;
+  })();
+
       const handleGoogleLogin = async () => {
         const { error } = await supabase.auth.signInWithOAuth({
           provider: 'google',
@@ -63,58 +74,66 @@ export function AuthScreen() {
       };
       
   return (
-    <div className="mx-auto flex min-h-dvh w-full max-w-md items-center px-4">
+    <div className="mx-auto flex min-h-dvh w-full max-w-md items-center px-4" dir="rtl">
       <Card className="w-full border-border/80 shadow-none">
         <CardHeader>
           <CardTitle className="text-center">
-            {mode === "login" ? "Login to Expandy" : "Sign up to Expandy"}
+            {mode === "login" ? "התחברות ל-Expandy" : "הרשמה ל-Expandy"}
           </CardTitle>
         </CardHeader>
         <CardContent>
           <form className="space-y-3" onSubmit={onSubmit}>
             <div className="space-y-1.5">
-              <Label htmlFor="auth-email">Email</Label>
+              <Label htmlFor="auth-email" className="text-right">אימייל</Label>
               <Input
                 id="auth-email"
                 type="email"
                 autoComplete="email"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
+                placeholder="אימייל"
+                dir="rtl"
+                className="text-right placeholder:text-right"
                 required
               />
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor="auth-pass">Password</Label>
+              <Label htmlFor="auth-pass" className="text-right">סיסמה</Label>
               <Input
                 id="auth-pass"
                 type="password"
                 autoComplete={mode === "login" ? "current-password" : "new-password"}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
+                placeholder="סיסמה"
+                dir="rtl"
+                className="text-right placeholder:text-right"
                 required
                 minLength={6}
               />
             </div>
             {mode === "signup" ? (
               <div className="space-y-1.5">
-                <Label htmlFor="auth-household">Household ID</Label>
+                <Label htmlFor="auth-household" className="text-right">מזהה משק בית</Label>
                 <Input
                   id="auth-household"
                   value={householdId}
                   onChange={(e) => setHouseholdId(e.target.value)}
+                  placeholder="מזהה משק בית"
+                  dir="rtl"
+                  className="text-right placeholder:text-right"
                   required
                 />
               </div>
             ) : null}
-            {error ? <p className="text-sm text-destructive">{error}</p> : null}
+            {localizedError ? <p className="text-sm text-destructive">{localizedError}</p> : null}
             {showEmailConfirmHint ? (
               <p className="text-xs text-muted-foreground">
-                If this is a new account, check your inbox and confirm your email first,
-                then try logging in again.
+                אם זה חשבון חדש, יש לאשר את ההרשמה במייל ורק אז להתחבר.
               </p>
             ) : null}
             <Button type="submit" className="w-full" disabled={loading}>
-              {loading ? "Please wait..." : mode === "login" ? "Login" : "Create account"}
+              {loading ? "אנא המתן..." : mode === "login" ? "התחברות" : "יצירת חשבון"}
             </Button>
             <Button
               type="button"
@@ -123,8 +142,8 @@ export function AuthScreen() {
               onClick={() => setMode((prev) => (prev === "login" ? "signup" : "login"))}
             >
               {mode === "login"
-                ? "Need an account? Sign up"
-                : "Already have an account? Login"}
+                ? "אין לך חשבון? להרשמה"
+                : "כבר יש לך חשבון? להתחברות"}
             </Button>
           </form>
           <div className="relative my-4">
@@ -146,7 +165,7 @@ export function AuthScreen() {
     alt="Google" 
     className="w-5 h-5"
   />
-  Google
+  המשך עם Google
 </button>
         </CardContent>
       </Card>

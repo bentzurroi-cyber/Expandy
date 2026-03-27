@@ -14,6 +14,7 @@ type AuthContextValue = {
   user: User | null;
   session: Session | null;
   profile: ProfileRow | null;
+  profileError: string | null;
   loading: boolean;
   signIn: (email: string, password: string) => Promise<string | null>;
   signUp: (
@@ -46,22 +47,30 @@ function newHouseholdId() {
   }
 }
 
-async function ensureProfile(user: User, householdId?: string, isAdmin = false) {
+async function ensureProfile(
+  user: User,
+  householdId?: string,
+  isAdmin = false,
+  fallbackHouseholdId = "roy-noy-home",
+) {
   const email = user.email?.trim().toLowerCase() ?? "";
   if (!email) return;
   console.log("[Auth] Profile fetch started", { userId: user.id });
-  const { data: existing } = await supabase
+  const { data: existing, error } = await supabase
     .from("profiles")
     .select("id, email, household_id, is_admin")
     .eq("id", user.id)
     .maybeSingle();
+  if (error) {
+    console.error("[Auth] Profile fetch failed", { userId: user.id, error: error.message });
+  }
   if (existing) {
     console.log("[Auth] Profile found", {
       userId: user.id,
       householdId: existing.household_id,
     });
     if (!existing.household_id) {
-      const assigned = householdId?.trim() || newHouseholdId();
+      const assigned = householdId?.trim() || fallbackHouseholdId;
       await supabase
         .from("profiles")
         .update({ household_id: assigned })
@@ -72,14 +81,17 @@ async function ensureProfile(user: User, householdId?: string, isAdmin = false) 
   }
   console.log("[Auth] Profile not found", { userId: user.id });
 
-  const resolvedHousehold = householdId?.trim() || newHouseholdId();
+  const resolvedHousehold = householdId?.trim() || fallbackHouseholdId;
 
-  await supabase.from("profiles").upsert({
+  const { error: upsertError } = await supabase.from("profiles").upsert({
     id: user.id,
     email,
     household_id: resolvedHousehold,
     is_admin: isAdmin,
   });
+  if (upsertError) {
+    console.error("[Auth] Profile upsert failed", { userId: user.id, error: upsertError.message });
+  }
   console.log("[Auth] Household ID assigned", {
     userId: user.id,
     householdId: resolvedHousehold,
@@ -113,6 +125,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [session, setSession] = useState<Session | null>(null);
   const [user, setUser] = useState<User | null>(null);
   const [profile, setProfile] = useState<ProfileRow | null>(null);
+  const [profileError, setProfileError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
   const fetchProfileByUserId = useCallback(async (userId: string) => {
@@ -124,11 +137,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           .select("id, email, household_id, is_admin")
           .eq("id", userId)
           .maybeSingle(),
-      12000,
+      5000,
       "Profile fetch",
     );
     if (error) {
-      console.log("[Auth] Profile fetch failed", { userId, error: error.message });
+      console.error("[Auth] Profile fetch failed", { userId, error: error.message });
       return null;
     }
     console.log(data ? "[Auth] Profile found" : "[Auth] Profile not found", { userId });
@@ -152,6 +165,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       });
       setSession(nextSession);
       setUser(nextSession?.user ?? null);
+      setProfileError(null);
       if (!nextSession?.user) {
         setProfile(null);
         return;
@@ -159,7 +173,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       try {
         await ensureProfile(nextSession.user);
       } catch (err) {
-        console.log("[Auth] ensureProfile failed", err);
+        console.error("[Auth] ensureProfile failed", err);
       }
       try {
         const nextProfile = await fetchProfileByUserId(nextSession.user.id);
@@ -167,16 +181,27 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           const forced = await forceCreateProfile(nextSession.user);
           if (forced) {
             setProfile(forced);
+            setProfileError(null);
           } else {
+            await ensureProfile(nextSession.user, "roy-noy-home", false, "roy-noy-home");
             const recovered = await fetchProfileByUserId(nextSession.user.id);
             setProfile(recovered);
+            if (!recovered) {
+              setProfileError("Profile not found in database");
+            }
           }
         } else {
           setProfile(nextProfile);
+          setProfileError(null);
         }
       } catch (err) {
-        console.log("[Auth] profile hydrate failed", err);
+        console.error("[Auth] profile hydrate failed", err);
         setProfile(null);
+        setProfileError(
+          err instanceof Error
+            ? `Profile fetch failed: ${err.message}`
+            : "Profile fetch failed",
+        );
       }
     },
     [fetchProfileByUserId],
@@ -184,13 +209,27 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const retryBootstrap = useCallback(async () => {
     setLoading(true);
+    setProfileError(null);
     try {
-      const { data } = await supabase.auth.getSession();
+      const { data } = await withTimeout(
+        async () => await supabase.auth.getSession(),
+        5000,
+        "Retry getSession",
+      );
       await applySession(data.session);
+      if (data.session?.user) {
+        const refreshed = await fetchProfileByUserId(data.session.user.id);
+        if (!refreshed) setProfileError("Profile not found in database");
+        else setProfile(refreshed);
+      }
+    } catch (err) {
+      setProfileError(
+        err instanceof Error ? `Retry failed: ${err.message}` : "Retry failed",
+      );
     } finally {
       setLoading(false);
     }
-  }, [applySession]);
+  }, [applySession, fetchProfileByUserId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -204,11 +243,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         if (cancelled) return;
         await applySession(data.session);
       } catch (err) {
-        console.log("[Auth] initial bootstrap failed", err);
+        console.error("[Auth] initial bootstrap failed", err);
         if (!cancelled) {
           setSession(null);
           setUser(null);
           setProfile(null);
+          setProfileError(
+            err instanceof Error ? `Bootstrap failed: ${err.message}` : "Bootstrap failed",
+          );
         }
       } finally {
         if (!cancelled) setLoading(false);
@@ -221,7 +263,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         try {
           await applySession(nextSession);
         } catch (err) {
-          console.log("[Auth] auth state handler failed", err);
+          console.error("[Auth] auth state handler failed", err);
+          if (!cancelled) {
+            setProfileError(
+              err instanceof Error
+                ? `Auth state failed: ${err.message}`
+                : "Auth state failed",
+            );
+          }
         } finally {
           if (!cancelled) setLoading(false);
         }
@@ -293,6 +342,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       user,
       session,
       profile,
+      profileError,
       loading,
       signIn,
       signUp,
@@ -304,6 +354,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       user,
       session,
       profile,
+      profileError,
       loading,
       signIn,
       signUp,
