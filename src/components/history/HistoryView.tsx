@@ -222,7 +222,7 @@ export function HistoryView({
     <div className="flex flex-col gap-3" dir={dir}>
       <h1 className="sr-only">{t.historyTitle}</h1>
       <div className="-mx-4 border-b border-border/80 bg-background px-4 py-3">
-        <div className="mx-auto grid max-w-4xl grid-cols-2 gap-3 lg:grid-cols-4">
+        <div className="mx-auto grid w-full max-w-lg grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
           <div className="space-y-1.5">
             <Label htmlFor="hist-month">{t.monthFilterLabel}</Label>
             <div className="mt-2">
@@ -233,7 +233,7 @@ export function HistoryView({
                 label={t.monthFilterLabel}
                 allTimeLabel={t.exportAllTime}
                 dir={dir}
-                triggerClassName="w-auto min-w-[9rem] max-w-[180px]"
+                triggerClassName="h-10 w-full"
               />
             </div>
           </div>
@@ -243,7 +243,7 @@ export function HistoryView({
               value={categoryFilter}
               onValueChange={setCategoryFilter}
             >
-              <SelectTrigger id="hist-cat" className="w-auto min-w-[9rem] max-w-[180px]">
+              <SelectTrigger id="hist-cat" className="h-10 w-full">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent position="popper">
@@ -321,7 +321,7 @@ export function HistoryView({
         </div>
       </div>
 
-      <ul className="flex flex-col gap-2 pb-2">
+      <ul className="mx-auto flex w-full max-w-lg flex-col gap-2 pb-2">
         {filtered.length === 0 ? (
           <p className="py-8 text-center text-sm text-muted-foreground">
             {t.historyEmpty}
@@ -339,7 +339,7 @@ export function HistoryView({
                     .replace("{{total}}", String(Math.max(1, e.installments)))
                 : null;
             return (
-              <li key={e.id} className="flex items-stretch gap-1">
+              <li key={e.id} className="flex w-full items-stretch gap-1">
                 <button
                   type="button"
                   onClick={() => onEditExpense(e)}
@@ -444,7 +444,7 @@ export function HistoryView({
 
       {filtered.length > 0 ? (
         <footer
-          className="sticky bottom-0 z-10 flex flex-wrap items-center justify-between gap-3 border-t border-border/80 bg-background/95 px-4 py-3 backdrop-blur supports-[backdrop-filter]:bg-background/80"
+          className="sticky bottom-0 z-10 mx-auto flex w-full max-w-lg flex-wrap items-center justify-between gap-3 border-t border-border/80 bg-background/95 px-4 py-3 backdrop-blur supports-[backdrop-filter]:bg-background/80"
           dir="ltr"
         >
           <div className="flex items-center gap-2">

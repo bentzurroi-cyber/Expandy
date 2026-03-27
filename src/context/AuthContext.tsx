@@ -29,6 +29,15 @@ type AuthContextValue = {
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
+async function withTimeout<T>(run: () => Promise<T>, ms: number, label: string): Promise<T> {
+  return await Promise.race([
+    run(),
+    new Promise<T>((_resolve, reject) => {
+      window.setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+    }),
+  ]);
+}
+
 function newHouseholdId() {
   try {
     return crypto.randomUUID();
@@ -108,11 +117,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const fetchProfileByUserId = useCallback(async (userId: string) => {
     console.log("[Auth] Profile fetch started", { userId });
-    const { data, error } = await supabase
-      .from("profiles")
-      .select("id, email, household_id, is_admin")
-      .eq("id", userId)
-      .maybeSingle();
+    const { data, error } = await withTimeout(
+      async () =>
+        await supabase
+          .from("profiles")
+          .select("id, email, household_id, is_admin")
+          .eq("id", userId)
+          .maybeSingle(),
+      12000,
+      "Profile fetch",
+    );
     if (error) {
       console.log("[Auth] Profile fetch failed", { userId, error: error.message });
       return null;
@@ -182,11 +196,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     let cancelled = false;
     void (async () => {
       try {
-        const { data } = await supabase.auth.getSession();
+        const { data } = await withTimeout(
+          async () => await supabase.auth.getSession(),
+          12000,
+          "Auth getSession",
+        );
         if (cancelled) return;
         await applySession(data.session);
       } catch (err) {
         console.log("[Auth] initial bootstrap failed", err);
+        if (!cancelled) {
+          setSession(null);
+          setUser(null);
+          setProfile(null);
+        }
       } finally {
         if (!cancelled) setLoading(false);
       }
