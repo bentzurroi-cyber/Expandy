@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Download, Trash2 } from "lucide-react";
 import { downloadExpensesCsv, type CsvLookup } from "@/lib/exportCsv";
 import { Button } from "@/components/ui/button";
@@ -68,6 +68,36 @@ import {
   normalizeHouseholdCode,
 } from "@/lib/household";
 
+async function countProfilesForHousehold(householdId: string): Promise<number> {
+  const { count, error } = await supabase
+    .from("profiles")
+    .select("*", { count: "exact", head: true })
+    .eq("household_id", householdId);
+  if (error) {
+    console.error("[Settings] countProfilesForHousehold", error);
+    return -1;
+  }
+  return count ?? 0;
+}
+
+/** Sum of rows across shared tables for this household (expenses, assets, categories, settings). */
+async function countHouseholdSharedDataRows(householdId: string): Promise<number> {
+  const tables = ["expenses", "assets", "categories", "settings"] as const;
+  let sum = 0;
+  for (const table of tables) {
+    const { count, error } = await supabase
+      .from(table)
+      .select("*", { count: "exact", head: true })
+      .eq("household_id", householdId);
+    if (error) {
+      console.error(`[Settings] countHouseholdSharedDataRows ${table}`, error);
+      return Number.POSITIVE_INFINITY;
+    }
+    sum += count ?? 0;
+  }
+  return sum;
+}
+
 export function SettingsView() {
   const { lang, setLang, t, dir } = useI18n();
   const { user, profile, refreshProfile } = useAuth();
@@ -131,20 +161,12 @@ export function SettingsView() {
   const [joinConfirmOpen, setJoinConfirmOpen] = useState(false);
   const [pendingJoinCode, setPendingJoinCode] = useState("");
   const [leaveConfirmOpen, setLeaveConfirmOpen] = useState(false);
+  const [leaveDialogMemberCount, setLeaveDialogMemberCount] = useState<number | null>(null);
 
   function randomHouseholdCode6(): string {
     const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
     let out = "";
     for (let i = 0; i < 6; i += 1) {
-      out += alphabet[Math.floor(Math.random() * alphabet.length)];
-    }
-    return out;
-  }
-
-  function generateRandomCode(length: number): string {
-    const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-    let out = "";
-    for (let i = 0; i < length; i += 1) {
       out += alphabet[Math.floor(Math.random() * alphabet.length)];
     }
     return out;
@@ -174,38 +196,72 @@ export function SettingsView() {
   }, [profile?.household_id]);
 
   useEffect(() => {
-    async function loadMembers() {
-      if (!profile?.household_id) {
-        setHouseholdMembers([]);
-        setMembersError(null);
-        setMembersLoading(false);
-        return;
-      }
-      setMembersLoading(true);
-      setMembersError(null);
-      const { data, error } = await supabase
-        .from("profiles")
-        .select("email")
-        .eq("household_id", profile.household_id)
-        .order("email", { ascending: true });
-      if (error) {
-        setHouseholdMembers([]);
-        setMembersError(
-          lang === "he"
-            ? `טעינת חברי משק הבית נכשלה: ${error.message}`
-            : `Failed to load household members: ${error.message}`,
-        );
-        setMembersLoading(false);
-        return;
-      }
-      const emails = (data ?? [])
-        .map((row) => (typeof row.email === "string" ? row.email.trim() : ""))
-        .filter(Boolean);
-      setHouseholdMembers(emails);
-      setMembersLoading(false);
+    if (!leaveConfirmOpen) {
+      setLeaveDialogMemberCount(null);
+      return;
     }
-    void loadMembers();
+    const code = normalizeHouseholdCode(profile?.household_id ?? "");
+    if (!code) {
+      setLeaveDialogMemberCount(null);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      const n = await countProfilesForHousehold(code);
+      if (!cancelled && n >= 0) setLeaveDialogMemberCount(n);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [leaveConfirmOpen, profile?.household_id]);
+
+  const loadHouseholdMembers = useCallback(async () => {
+    if (!profile?.household_id) {
+      setHouseholdMembers([]);
+      setMembersError(null);
+      setMembersLoading(false);
+      return;
+    }
+    setMembersLoading(true);
+    setMembersError(null);
+    const { data, error } = await supabase
+      .from("profiles")
+      .select("email")
+      .eq("household_id", profile.household_id)
+      .order("email", { ascending: true });
+    if (error) {
+      setHouseholdMembers([]);
+      setMembersError(
+        lang === "he"
+          ? `טעינת חברי משק הבית נכשלה: ${error.message}`
+          : `Failed to load household members: ${error.message}`,
+      );
+      setMembersLoading(false);
+      return;
+    }
+    const emails = (data ?? [])
+      .map((row) => (typeof row.email === "string" ? row.email.trim() : ""))
+      .filter(Boolean);
+    setHouseholdMembers(emails);
+    setMembersLoading(false);
   }, [lang, profile?.household_id]);
+
+  useEffect(() => {
+    void loadHouseholdMembers();
+  }, [loadHouseholdMembers]);
+
+  useEffect(() => {
+    if (!profile?.household_id) return;
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void loadHouseholdMembers();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    const interval = window.setInterval(() => void loadHouseholdMembers(), 25000);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisible);
+      window.clearInterval(interval);
+    };
+  }, [profile?.household_id, loadHouseholdMembers]);
 
   useEffect(() => {
     async function migrateLegacyHouseholdCode() {
@@ -444,6 +500,22 @@ export function SettingsView() {
         window.alert(lang === "he" ? "הקוד כבר לא קיים. נסה שוב." : "Code no longer exists.");
         return;
       }
+      // Move expenses first while profile.household_id still matches those rows (RLS).
+      if (importPreviousData && oldHouseholdId && oldHouseholdId !== nextId) {
+        const { error: migrateError } = await supabase
+          .from("expenses")
+          .update({ household_id: nextId })
+          .eq("user_id", user.id)
+          .eq("household_id", oldHouseholdId);
+        if (migrateError) {
+          window.alert(
+            lang === "he"
+              ? `ייבוא הנתונים נכשל: ${migrateError.message}`
+              : `Could not import your expenses: ${migrateError.message}`,
+          );
+          return;
+        }
+      }
       const { error: updateProfileError } = await supabase
         .from("profiles")
         .update({ household_id: nextId })
@@ -455,20 +527,6 @@ export function SettingsView() {
             : `Failed to join household: ${updateProfileError.message}`,
         );
         return;
-      }
-      if (importPreviousData && oldHouseholdId && oldHouseholdId !== nextId) {
-        const { error: migrateError } = await supabase
-          .from("expenses")
-          .update({ household_id: nextId })
-          .eq("user_id", user.id)
-          .eq("household_id", oldHouseholdId);
-        if (migrateError) {
-          window.alert(
-            lang === "he"
-              ? `ההצטרפות הושלמה, אך ייבוא הנתונים נכשל: ${migrateError.message}`
-              : `Joined, but data migration failed: ${migrateError.message}`,
-          );
-        }
       }
       await refreshProfile();
       const { data: refreshedProfile } = await supabase
@@ -515,26 +573,26 @@ export function SettingsView() {
     if (!user?.id) return;
     setLeaveLoading(true);
     try {
-      const newCode = generateRandomCode(6); // generate code
-      const { error: insertError } = await supabase
-        .from("households")
-        .insert({ code: newCode, created_by: user.id });
-      if (insertError) {
-        window.alert(`Insert Error: ${insertError.message}`);
+      const oldHouseholdId = normalizeHouseholdCode(profile?.household_id ?? "");
+      if (!oldHouseholdId) {
+        window.alert(
+          lang === "he" ? "אין משק בית פעיל." : "No active household.",
+        );
         return;
       }
 
-      const { error: updateError } = await supabase
-        .from("profiles")
-        .update({ household_id: newCode })
-        .eq("id", user.id);
-      if (updateError) {
-        window.alert(`Update Error: ${updateError.message}`);
+      const memberCount = await countProfilesForHousehold(oldHouseholdId);
+      if (memberCount < 0) {
+        window.alert(
+          lang === "he"
+            ? "לא הצלחנו לבדוק את מספר החברים. נסה שוב."
+            : "Could not verify household members. Please try again.",
+        );
         return;
       }
 
+      const newCode = await allocateNewHouseholdCode(user.id);
       if (mode === "take-data") {
-        const oldHouseholdId = normalizeHouseholdCode(profile?.household_id ?? "");
         if (oldHouseholdId && oldHouseholdId !== newCode) {
           const { error: migrateMineError } = await supabase
             .from("expenses")
@@ -548,7 +606,30 @@ export function SettingsView() {
         }
       }
 
-      // Update UI state here
+      const dataFootprint = await countHouseholdSharedDataRows(oldHouseholdId);
+      const lastMemberAlone = memberCount === 1;
+      const canDeleteEmptyHouseholdRow =
+        lastMemberAlone && dataFootprint === 0;
+
+      const { error: updateError } = await supabase
+        .from("profiles")
+        .update({ household_id: newCode })
+        .eq("id", user.id);
+      if (updateError) {
+        window.alert(`Update Error: ${updateError.message}`);
+        return;
+      }
+
+      if (canDeleteEmptyHouseholdRow) {
+        const { error: delErr } = await supabase
+          .from("households")
+          .delete()
+          .eq("code", oldHouseholdId);
+        if (delErr) {
+          console.warn("[Settings] leave: could not remove empty household row", delErr);
+        }
+      }
+
       setDisplayHouseholdCode(newCode);
       await refreshProfile();
       setLeaveConfirmOpen(false);
@@ -1379,6 +1460,21 @@ export function SettingsView() {
             <AlertDialogDescription>
               בחר אם להתחיל דף חדש או לקחת איתך את הנתונים שיצרת.
             </AlertDialogDescription>
+            {leaveDialogMemberCount !== null && leaveDialogMemberCount > 1 ? (
+              <p className="mt-3 border-t border-border pt-3 text-xs text-muted-foreground">
+                {lang === "he" ? (
+                  <>
+                    שים לב: שאר חברי משק הבית יישארו בבית זה ויוכלו להמשיך לראות את המידע שלא בחרת
+                    לקחת איתך.
+                  </>
+                ) : (
+                  <>
+                    Note: Other household members will stay in this home and can keep seeing data
+                    you did not choose to take with you.
+                  </>
+                )}
+              </p>
+            ) : null}
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel disabled={leaveLoading}>ביטול</AlertDialogCancel>

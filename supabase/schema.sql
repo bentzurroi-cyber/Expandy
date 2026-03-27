@@ -106,10 +106,28 @@ drop policy if exists "households_insert_authenticated" on public.households;
 create policy "households_insert_authenticated" on public.households
 for insert with check (auth.uid() is not null);
 
--- profiles: users can read/write their profile.
+-- Allow removing a household row only when no profile references it (last member left with no shared data).
+drop policy if exists "households_delete_unreferenced" on public.households;
+create policy "households_delete_unreferenced" on public.households
+for delete using (
+  not exists (
+    select 1 from public.profiles p
+    where p.household_id = households.code
+  )
+);
+
+-- profiles: own row read/write; read peers in the same household (for member lists).
 drop policy if exists "profiles_select_own" on public.profiles;
 create policy "profiles_select_own" on public.profiles
-for select using (auth.uid() = id);
+for select using (
+  auth.uid() = id
+  or exists (
+    select 1
+    from public.profiles as me
+    where me.id = auth.uid()
+      and me.household_id = profiles.household_id
+  )
+);
 drop policy if exists "profiles_upsert_own" on public.profiles;
 create policy "profiles_upsert_own" on public.profiles
 for all using (auth.uid() = id) with check (auth.uid() = id);
