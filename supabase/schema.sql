@@ -9,6 +9,7 @@ create table if not exists public.households (
   check (code ~ '^[A-Z0-9]{6}$')
 );
 
+-- household_id must reference public.households(code); no default — each signup allocates a row in households first.
 create table if not exists public.profiles (
   id uuid primary key references auth.users (id) on delete cascade,
   email text not null unique,
@@ -175,6 +176,9 @@ with check (
 );
 
 -- Optional but recommended: auto-create profile row on auth signup.
+-- Allocates a household row first, then the profile row (FK order).
+-- Retries on unique_violation so two signups cannot silently share one code
+-- (the old "on conflict do nothing" on households could leave two profiles on the same code).
 create or replace function public.handle_new_user_profile()
 returns trigger
 language plpgsql
@@ -184,16 +188,23 @@ as $$
 declare
   generated_code text;
 begin
-  -- Generate a unique 6-char household code.
+  <<alloc_loop>>
   loop
-    generated_code := substring(translate(encode(gen_random_bytes(6), 'base64'), '+/=', 'XYZ') from 1 for 6);
-    generated_code := upper(regexp_replace(generated_code, '[^A-Z0-9]', 'A', 'g'));
-    exit when generated_code ~ '^[A-Z0-9]{6}$'
-      and not exists (select 1 from public.households h where h.code = generated_code);
+    loop
+      generated_code := substring(translate(encode(gen_random_bytes(6), 'base64'), '+/=', 'XYZ') from 1 for 6);
+      generated_code := upper(regexp_replace(generated_code, '[^A-Z0-9]', 'A', 'g'));
+      exit when generated_code ~ '^[A-Z0-9]{6}$'
+        and not exists (select 1 from public.households h where h.code = generated_code);
+    end loop;
+    begin
+      insert into public.households (code, created_by)
+      values (generated_code, new.id);
+      exit alloc_loop;
+    exception
+      when unique_violation then
+        null;
+    end;
   end loop;
-  insert into public.households (code, created_by)
-  values (generated_code, new.id)
-  on conflict (code) do nothing;
 
   insert into public.profiles (id, email, household_id, is_admin)
   values (

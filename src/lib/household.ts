@@ -51,6 +51,7 @@ export async function doesHouseholdCodeExist(codeInput: string): Promise<boolean
   return Boolean(data?.code);
 }
 
+/** Inserts a new row into `households` and returns the new code. Call this before creating a profile row. */
 export async function generateUniqueHouseholdCode(createdBy?: string | null): Promise<string> {
   for (let i = 0; i < 40; i += 1) {
     const code = randomHouseholdCode();

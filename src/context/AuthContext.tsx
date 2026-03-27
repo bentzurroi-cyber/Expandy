@@ -46,15 +46,32 @@ async function withTimeout<T>(run: () => Promise<T>, ms: number, label: string):
   ]);
 }
 
-async function ensureProfile(
-  user: User,
-  householdId?: string,
-  isAdmin = false,
-  fallbackHouseholdId?: string,
-) {
+type EnsureProfileOptions = {
+  /** If set and the code exists in `households`, link this user to that household instead of creating a new one. */
+  joinHouseholdCode?: string;
+  isAdmin?: boolean;
+};
+
+async function resolveWantsJoin(joinHouseholdCode: string | undefined): Promise<{
+  wantsJoin: boolean;
+  normalizedJoin: string;
+}> {
+  const normalizedJoin = normalizeHouseholdCode(joinHouseholdCode ?? "");
+  if (!isValidHouseholdCode(normalizedJoin)) {
+    return { wantsJoin: false, normalizedJoin };
+  }
+  const exists = await doesHouseholdCodeExist(normalizedJoin).catch(() => false);
+  return { wantsJoin: exists, normalizedJoin };
+}
+
+async function ensureProfile(user: User, options?: EnsureProfileOptions) {
+  const isAdmin = options?.isAdmin ?? false;
   const email = user.email?.trim().toLowerCase() ?? "";
   if (!email) return;
-  console.log("[Auth] Profile fetch started", { userId: user.id });
+
+  const { wantsJoin, normalizedJoin } = await resolveWantsJoin(options?.joinHouseholdCode);
+
+  console.log("[Auth] Profile fetch started", { userId: user.id, wantsJoin });
   const { data: existing, error } = await supabase
     .from("profiles")
     .select("id, email, household_id, is_admin")
@@ -68,31 +85,34 @@ async function ensureProfile(
       userId: user.id,
       householdId: existing.household_id,
     });
+    if (wantsJoin) {
+      const current = normalizeHouseholdCode(existing.household_id ?? "");
+      if (current !== normalizedJoin) {
+        await ensureHouseholdExists(normalizedJoin, user.id);
+        await supabase.from("profiles").update({ household_id: normalizedJoin }).eq("id", user.id);
+        console.log("[Auth] Profile linked to requested household", {
+          userId: user.id,
+          householdId: normalizedJoin,
+        });
+      }
+      return;
+    }
     if (!isValidHouseholdCode(existing.household_id ?? "")) {
-      const assignedInput = householdId?.trim() || fallbackHouseholdId;
-      const assigned = isValidHouseholdCode(assignedInput ?? "")
-        ? normalizeHouseholdCode(assignedInput ?? "")
-        : await generateUniqueHouseholdCode(user.id);
+      const assigned = await generateUniqueHouseholdCode(user.id);
       await ensureHouseholdExists(assigned, user.id);
-      await supabase
-        .from("profiles")
-        .update({ household_id: assigned })
-        .eq("id", user.id);
-      console.log("[Auth] Household ID assigned", { userId: user.id, householdId: assigned });
+      await supabase.from("profiles").update({ household_id: assigned }).eq("id", user.id);
+      console.log("[Auth] Household ID assigned (invalid → new)", { userId: user.id, householdId: assigned });
     }
     return;
   }
-  console.log("[Auth] Profile not found", { userId: user.id });
+  console.log("[Auth] Profile not found — creating with new or joined household", { userId: user.id });
 
-  const provided = normalizeHouseholdCode(householdId ?? "");
-  const shouldUseProvided =
-    provided.length === 6 && (await doesHouseholdCodeExist(provided).catch(() => false));
-  const resolvedHousehold = shouldUseProvided
-    ? provided
-    : isValidHouseholdCode(fallbackHouseholdId ?? "")
-      ? normalizeHouseholdCode(fallbackHouseholdId ?? "")
-      : await generateUniqueHouseholdCode(user.id);
-  await ensureHouseholdExists(resolvedHousehold, user.id);
+  const resolvedHousehold = wantsJoin
+    ? normalizedJoin
+    : await generateUniqueHouseholdCode(user.id);
+  if (wantsJoin) {
+    await ensureHouseholdExists(resolvedHousehold, user.id);
+  }
 
   const { error: upsertError } = await supabase.from("profiles").upsert({
     id: user.id,
@@ -113,7 +133,6 @@ async function forceCreateProfile(user: User): Promise<ProfileRow | null> {
   const email = user.email?.trim().toLowerCase() ?? "";
   if (!email) return null;
   const assigned = await generateUniqueHouseholdCode(user.id);
-  await ensureHouseholdExists(assigned, user.id);
   const payload: ProfileRow = {
     id: user.id,
     email,
@@ -365,7 +384,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         if (!nextUser) return "Signup succeeded but no user was returned.";
 
         try {
-          await ensureProfile(nextUser, householdId, isAdmin);
+          await ensureProfile(nextUser, {
+            joinHouseholdCode: householdId.trim() || undefined,
+            isAdmin,
+          });
         } catch (err) {
           console.log("[Auth] ensureProfile during signup failed", err);
           return "Signed up, but profile creation failed (likely RLS). Confirm email/login again, or fix Profiles RLS.";
