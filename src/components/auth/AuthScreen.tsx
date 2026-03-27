@@ -9,7 +9,7 @@ import { supabase } from '../../lib/supabase';
 import { normalizeHouseholdCode } from "@/lib/household";
 
 export function AuthScreen() {
-  const { signIn, signUp } = useAuth();
+  const { signUp } = useAuth();
   const [mode, setMode] = useState<"login" | "signup">("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -27,16 +27,28 @@ export function AuthScreen() {
     ]);
   }
 
+  async function handleLogin() {
+    const { error } = await supabase.auth.signInWithPassword({
+      email: email.trim(),
+      password,
+    });
+    if (error) {
+      window.alert(error.message);
+      return;
+    }
+  }
+
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
     setLoading(true);
     setError(null);
     try {
-      const nextError =
-        mode === "login"
-          ? await withTimeout(signIn(email, password))
-          : await withTimeout(signUp(email, password, householdId, false));
-      setError(nextError);
+      if (mode === "login") {
+        await withTimeout(handleLogin());
+      } else {
+        const nextError = await withTimeout(signUp(email, password, householdId, false));
+        setError(nextError);
+      }
     } catch (err) {
       const msg =
         err instanceof Error ? err.message : "Unknown error during authentication";

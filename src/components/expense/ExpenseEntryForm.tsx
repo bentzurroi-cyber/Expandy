@@ -25,6 +25,7 @@ import { AddCategoryDialog } from "./AddCategoryDialog";
 import { AddNameDialog } from "@/components/common/AddNameDialog";
 import { ManagePaymentMethodsDialog } from "./ManagePaymentMethodsDialog";
 import { MOCK_PAYMENT_METHODS } from "@/data/mock";
+import { toast } from "sonner";
 
 export function ExpenseEntryForm() {
   const { t, dir } = useI18n();
@@ -133,8 +134,8 @@ export function ExpenseEntryForm() {
     setNote("");
     setInstallments(1);
     setRecurringMonthly(false);
-    setHint("ההוצאה נשמרה בהצלחה בענן.");
-    setTimeout(() => setHint(null), 3200);
+    setHint(null);
+    toast.success("הנתונים הוזנו בהצלחה", { duration: 3000 });
   }
 
   return (

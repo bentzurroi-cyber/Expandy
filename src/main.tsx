@@ -7,6 +7,7 @@ import { ExpensesProvider } from "./context/ExpensesContext";
 import { I18nProvider } from "./context/I18nContext";
 import { ThemeProvider } from "./context/ThemeContext";
 import { AuthProvider } from "./context/AuthContext";
+import { Toaster } from "sonner";
 import "./index.css";
 import "react-day-picker/style.css";
 
@@ -29,6 +30,12 @@ createRoot(document.getElementById("root")!).render(
             <BudgetProvider>
               <ExpensesProvider>
                 <App />
+                <Toaster
+                  position="top-center"
+                  richColors
+                  closeButton={false}
+                  duration={3000}
+                />
               </ExpensesProvider>
             </BudgetProvider>
           </AssetsProvider>

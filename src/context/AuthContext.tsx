@@ -4,7 +4,6 @@ import {
   useContext,
   useEffect,
   useMemo,
-  useRef,
   useState,
   type ReactNode,
 } from "react";
@@ -144,13 +143,13 @@ function guestProfileFor(user: User): ProfileRow {
 }
 
 export function AuthProvider({ children }: { children: ReactNode }) {
+  console.log("AuthContext Mounting...");
+
   const [session, setSession] = useState<Session | null>(null);
   const [user, setUser] = useState<User | null>(null);
   const [profile, setProfile] = useState<ProfileRow | null>(null);
   const [profileError, setProfileError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const bootstrappedRef = useRef(false);
-  const authRefreshInFlightRef = useRef(false);
 
   const fetchProfileByUserId = useCallback(async (userId: string) => {
     console.log("[Auth] Profile fetch started", { userId });
@@ -194,24 +193,26 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setProfile(null);
         return;
       }
+      const u = nextSession.user;
+      // Default profile immediately so nothing blocks leaving the auth screen / main UI.
+      setProfile(guestProfileFor(u));
       try {
-        await ensureProfile(nextSession.user);
+        await ensureProfile(u);
       } catch (err) {
         console.error("[Auth] ensureProfile failed", err);
       }
       try {
-        const nextProfile = await fetchProfileByUserId(nextSession.user.id);
+        const nextProfile = await fetchProfileByUserId(u.id);
         if (!nextProfile) {
-          const forced = await forceCreateProfile(nextSession.user);
+          const forced = await forceCreateProfile(u);
           if (forced) {
             setProfile(forced);
             setProfileError(null);
           } else {
-            await ensureProfile(nextSession.user);
-            const recovered = await fetchProfileByUserId(nextSession.user.id);
-            setProfile(recovered);
+            await ensureProfile(u);
+            const recovered = await fetchProfileByUserId(u.id);
+            setProfile(recovered ?? guestProfileFor(u));
             if (!recovered) {
-              setProfile(guestProfileFor(nextSession.user));
               setProfileError("Profile not found in database");
             }
           }
@@ -221,7 +222,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         }
       } catch (err) {
         console.error("[Auth] profile hydrate failed", err);
-        setProfile(guestProfileFor(nextSession.user));
+        setProfile(guestProfileFor(u));
         setProfileError(
           err instanceof Error
             ? `Profile fetch failed: ${err.message}`
@@ -233,50 +234,49 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   );
 
   const retryBootstrap = useCallback(async () => {
-    if (authRefreshInFlightRef.current) return;
-    authRefreshInFlightRef.current = true;
     setLoading(true);
     setProfileError(null);
     try {
       const { data } = await supabase.auth.getSession();
-      console.log("[Auth] getSession completed");
+      console.log("[Auth] getSession completed (retry)");
       await applySession(data.session);
-      if (data.session?.user) {
-        const refreshed = await fetchProfileByUserId(data.session.user.id);
-        if (!refreshed) setProfileError("Profile not found in database");
-        else setProfile(refreshed);
-      }
     } catch (err) {
       console.error("[Auth] retry bootstrap failed", err);
       setProfileError(
         err instanceof Error ? `Retry failed: ${err.message}` : "Retry failed",
       );
     } finally {
-      authRefreshInFlightRef.current = false;
       setLoading(false);
     }
-  }, [applySession, fetchProfileByUserId]);
+  }, [applySession]);
+
+  // SPA "home" after login — no react-router in this project; align URL with main app.
+  useEffect(() => {
+    if (!session) return;
+    if (typeof window === "undefined") return;
+    try {
+      const path = window.location.pathname || "/";
+      if (path !== "/" && path !== "") {
+        window.history.replaceState(null, "", "/");
+      }
+    } catch {
+      /* ignore */
+    }
+  }, [session]);
 
   useEffect(() => {
-    if (bootstrappedRef.current) return;
-    bootstrappedRef.current = true;
     let cancelled = false;
 
-    const bootstrapSession = async (setUiLoading: boolean) => {
-      if (authRefreshInFlightRef.current) return;
-      authRefreshInFlightRef.current = true;
-      if (setUiLoading && !cancelled) {
-        setLoading(true);
-        setProfileError(null);
-      }
+    async function bootstrap() {
+      setLoading(true);
+      setProfileError(null);
       try {
         const { data } = await supabase.auth.getSession();
-        console.log("[Auth] getSession completed");
-        if (cancelled) return;
-        await applySession(data.session);
+        console.log("[Auth] getSession completed (bootstrap)");
+        if (!cancelled) await applySession(data.session);
       } catch (err) {
         console.error("[Auth] initial bootstrap failed", err);
-        if (!cancelled && setUiLoading) {
+        if (!cancelled) {
           setSession(null);
           setUser(null);
           setProfile(null);
@@ -285,42 +285,28 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           );
         }
       } finally {
-        authRefreshInFlightRef.current = false;
-        if (!cancelled && setUiLoading) setLoading(false);
+        if (!cancelled) setLoading(false);
       }
-    };
+    }
 
-    void (async () => {
-      await bootstrapSession(true);
-    })();
+    void bootstrap();
 
-    const { data: listener } = supabase.auth.onAuthStateChange(
-      async (_event, nextSession) => {
-        if (cancelled) return;
-        if (authRefreshInFlightRef.current) return;
-        authRefreshInFlightRef.current = true;
-        setLoading(true);
-        try {
-          await applySession(nextSession);
-        } catch (err) {
-          console.error("[Auth] auth state handler failed", err);
-          if (!cancelled) {
-            setProfileError(
-              err instanceof Error
-                ? `Auth state failed: ${err.message}`
-                : "Auth state failed",
-            );
-          }
-        } finally {
-          authRefreshInFlightRef.current = false;
-          if (!cancelled) setLoading(false);
-        }
-      },
-    );
+    const { data: listener } = supabase.auth.onAuthStateChange((event, nextSession) => {
+      console.log("Auth state changed:", event, nextSession);
+      if (cancelled) return;
+      void applySession(nextSession).catch((err) => {
+        console.error("[Auth] onAuthStateChange applySession failed", err);
+      });
+    });
 
     const onVisibilityChange = () => {
-      if (document.visibilityState !== "visible") return;
-      void bootstrapSession(false);
+      if (document.visibilityState !== "visible" || cancelled) return;
+      void supabase.auth.getSession().then(({ data }) => {
+        if (cancelled) return;
+        void applySession(data.session).catch((err) =>
+          console.error("[Auth] visibility refresh failed", err),
+        );
+      });
     };
     document.addEventListener("visibilitychange", onVisibilityChange);
 
@@ -331,21 +317,34 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
   }, [applySession]);
 
-  const signIn = useCallback(async (email: string, password: string) => {
-    const { error } = await supabase.auth.signInWithPassword({
-      email: email.trim(),
-      password,
-    });
-    if (!error) return null;
-    const msg = error.message.toLowerCase();
-    if (msg.includes("invalid login credentials")) {
-      return "Invalid login credentials. Check email/password, and if you just signed up verify your email first.";
-    }
-    if (msg.includes("email not confirmed")) {
-      return "Email confirmation is required before login. Please verify from your inbox.";
-    }
-    return error.message;
-  }, []);
+  const signIn = useCallback(
+    async (email: string, password: string) => {
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email: email.trim(),
+        password,
+      });
+      if (!error) {
+        const s = data.session ?? (await supabase.auth.getSession()).data.session;
+        if (s) {
+          try {
+            await applySession(s);
+          } catch (err) {
+            console.error("[Auth] signIn applySession failed", err);
+          }
+        }
+        return null;
+      }
+      const msg = error.message.toLowerCase();
+      if (msg.includes("invalid login credentials")) {
+        return "Invalid login credentials. Check email/password, and if you just signed up verify your email first.";
+      }
+      if (msg.includes("email not confirmed")) {
+        return "Email confirmation is required before login. Please verify from your inbox.";
+      }
+      return error.message;
+    },
+    [applySession],
+  );
 
   const signUp = useCallback(
     async (email: string, password: string, householdId: string, isAdmin = false) => {

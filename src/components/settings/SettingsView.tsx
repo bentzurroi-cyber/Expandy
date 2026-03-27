@@ -128,6 +128,9 @@ export function SettingsView() {
   const [membersError, setMembersError] = useState<string | null>(null);
   const [autoFixingHouseholdCode, setAutoFixingHouseholdCode] = useState(false);
   const [displayHouseholdCode, setDisplayHouseholdCode] = useState("");
+  const [joinConfirmOpen, setJoinConfirmOpen] = useState(false);
+  const [pendingJoinCode, setPendingJoinCode] = useState("");
+  const [leaveConfirmOpen, setLeaveConfirmOpen] = useState(false);
 
   function randomHouseholdCode6(): string {
     const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -407,47 +410,92 @@ export function SettingsView() {
       return;
     }
     setJoinLoading(true);
-    let exists = false;
     try {
-      exists = await doesHouseholdCodeExist(nextId);
-    } catch (err) {
-      setJoinLoading(false);
+      const exists = await doesHouseholdCodeExist(nextId);
+      if (!exists) {
+        window.alert(
+          lang === "he"
+            ? "לא מצאנו משק בית עם הקוד הזה. אפשר לנסות שוב בנחת."
+            : "We could not find a household with this code. Please try again.",
+        );
+        return;
+      }
+      setPendingJoinCode(nextId);
+      setJoinConfirmOpen(true);
+    } catch {
       window.alert(
         lang === "he"
           ? "לא הצלחנו לאמת את הקוד כרגע. נסה שוב בעוד רגע."
           : "Could not validate the code right now. Please try again.",
       );
-      return;
-    }
-    if (!exists) {
+    } finally {
       setJoinLoading(false);
+    }
+  }
+
+  async function handleJoinHousehold(importPreviousData: boolean) {
+    const nextId = pendingJoinCode;
+    const oldHouseholdId = normalizeHouseholdCode(profile?.household_id ?? "");
+    if (!nextId || !user?.id) return;
+    setJoinLoading(true);
+    try {
+      const exists = await doesHouseholdCodeExist(nextId);
+      if (!exists) {
+        window.alert(lang === "he" ? "הקוד כבר לא קיים. נסה שוב." : "Code no longer exists.");
+        return;
+      }
+      const { error: updateProfileError } = await supabase
+        .from("profiles")
+        .update({ household_id: nextId })
+        .eq("id", user.id);
+      if (updateProfileError) {
+        window.alert(
+          lang === "he"
+            ? `הצטרפות למשק הבית נכשלה: ${updateProfileError.message}`
+            : `Failed to join household: ${updateProfileError.message}`,
+        );
+        return;
+      }
+      if (importPreviousData && oldHouseholdId && oldHouseholdId !== nextId) {
+        const { error: migrateError } = await supabase
+          .from("expenses")
+          .update({ household_id: nextId })
+          .eq("user_id", user.id)
+          .eq("household_id", oldHouseholdId);
+        if (migrateError) {
+          window.alert(
+            lang === "he"
+              ? `ההצטרפות הושלמה, אך ייבוא הנתונים נכשל: ${migrateError.message}`
+              : `Joined, but data migration failed: ${migrateError.message}`,
+          );
+        }
+      }
+      await refreshProfile();
+      const { data: refreshedProfile } = await supabase
+        .from("profiles")
+        .select("household_id")
+        .eq("id", user.id)
+        .maybeSingle();
+      if (normalizeHouseholdCode(refreshedProfile?.household_id ?? "") !== nextId) {
+        window.alert(
+          lang === "he"
+            ? "ההצטרפות עוד לא הסתנכרנה. נסה שוב בעוד רגע."
+            : "Join has not synced yet. Please try again in a moment.",
+        );
+        return;
+      }
+      setDisplayHouseholdCode(nextId);
+      setJoinHouseholdId("");
+      setPendingJoinCode("");
+      setJoinConfirmOpen(false);
       window.alert(
         lang === "he"
-          ? "לא מצאנו משק בית עם הקוד הזה. אפשר לנסות שוב בנחת."
-          : "We could not find a household with this code. Please try again.",
+          ? "הצטרפת בהצלחה למשק הבית. הנתונים המשותפים מוכנים."
+          : "Joined household successfully. Shared data is ready.",
       );
-      return;
+    } finally {
+      setJoinLoading(false);
     }
-    const { error } = await supabase
-      .from("profiles")
-      .update({ household_id: nextId })
-      .eq("id", user.id);
-    setJoinLoading(false);
-    if (error) {
-      window.alert(
-        lang === "he"
-          ? `הצטרפות למשק הבית נכשלה: ${error.message}`
-          : `Failed to join household: ${error.message}`,
-      );
-      return;
-    }
-    await refreshProfile();
-    setJoinHouseholdId("");
-    window.alert(
-      lang === "he"
-        ? "הצטרפת בהצלחה למשק הבית. הנתונים המשותפים יתרעננו כעת."
-        : "Joined household successfully. Shared data will refresh now.",
-    );
   }
 
   async function handleLogout() {
@@ -463,7 +511,7 @@ export function SettingsView() {
     }
   }
 
-  async function handleLeaveHousehold() {
+  async function handleLeaveHousehold(mode: "fresh" | "take-data") {
     if (!user?.id) return;
     setLeaveLoading(true);
     try {
@@ -485,9 +533,25 @@ export function SettingsView() {
         return;
       }
 
+      if (mode === "take-data") {
+        const oldHouseholdId = normalizeHouseholdCode(profile?.household_id ?? "");
+        if (oldHouseholdId && oldHouseholdId !== newCode) {
+          const { error: migrateMineError } = await supabase
+            .from("expenses")
+            .update({ household_id: newCode })
+            .eq("user_id", user.id)
+            .eq("household_id", oldHouseholdId);
+          if (migrateMineError) {
+            window.alert(`Update Error: ${migrateMineError.message}`);
+            return;
+          }
+        }
+      }
+
       // Update UI state here
       setDisplayHouseholdCode(newCode);
       await refreshProfile();
+      setLeaveConfirmOpen(false);
       window.alert(
         lang === "he"
           ? `עודכן קוד משק בית חדש: ${newCode}`
@@ -506,6 +570,11 @@ export function SettingsView() {
     } finally {
       setLeaveLoading(false);
     }
+  }
+
+  async function handleLeaveMode(mode: "fresh" | "take-data") {
+    if (!user?.id) return;
+    await handleLeaveHousehold(mode);
   }
 
   return (
@@ -610,7 +679,7 @@ export function SettingsView() {
           <Button
             type="button"
             variant="outline"
-            onClick={() => void handleLeaveHousehold()}
+            onClick={() => setLeaveConfirmOpen(true)}
             disabled={leaveLoading || !user?.id}
           >
             {lang === "he" ? (leaveLoading ? "יוצא..." : "עזיבת משק בית") : leaveLoading ? "Leaving..." : "Leave Household"}
@@ -1268,6 +1337,66 @@ export function SettingsView() {
               }}
             >
               {t.deleteCategory}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={joinConfirmOpen} onOpenChange={setJoinConfirmOpen}>
+        <AlertDialogContent dir="rtl">
+          <AlertDialogHeader>
+            <AlertDialogTitle>אישור הצטרפות</AlertDialogTitle>
+            <AlertDialogDescription>
+              האם תרצה לייבא את הנתונים הקודמים שלך למשק הבית המשותף?
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={joinLoading}>ביטול</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                void handleJoinHousehold(false);
+              }}
+              disabled={joinLoading}
+            >
+              לא, רק להצטרף
+            </AlertDialogAction>
+            <AlertDialogAction
+              onClick={() => {
+                void handleJoinHousehold(true);
+              }}
+              disabled={joinLoading}
+            >
+              כן, לייבא נתונים
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={leaveConfirmOpen} onOpenChange={setLeaveConfirmOpen}>
+        <AlertDialogContent dir="rtl">
+          <AlertDialogHeader>
+            <AlertDialogTitle>איך תרצה לעזוב?</AlertDialogTitle>
+            <AlertDialogDescription>
+              בחר אם להתחיל דף חדש או לקחת איתך את הנתונים שיצרת.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={leaveLoading}>ביטול</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                void handleLeaveMode("fresh");
+              }}
+              disabled={leaveLoading}
+            >
+              התחל דף חדש
+            </AlertDialogAction>
+            <AlertDialogAction
+              onClick={() => {
+                void handleLeaveMode("take-data");
+              }}
+              disabled={leaveLoading}
+            >
+              קח את הנתונים שלי
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
