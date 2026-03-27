@@ -4,6 +4,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
@@ -121,12 +122,22 @@ async function forceCreateProfile(user: User): Promise<ProfileRow | null> {
   return (data as ProfileRow | null) ?? payload;
 }
 
+function guestProfileFor(user: User): ProfileRow {
+  return {
+    id: user.id,
+    email: user.email?.trim().toLowerCase() ?? "",
+    household_id: "roy-noy-home",
+    is_admin: false,
+  };
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [session, setSession] = useState<Session | null>(null);
   const [user, setUser] = useState<User | null>(null);
   const [profile, setProfile] = useState<ProfileRow | null>(null);
   const [profileError, setProfileError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const bootstrappedRef = useRef(false);
 
   const fetchProfileByUserId = useCallback(async (userId: string) => {
     console.log("[Auth] Profile fetch started", { userId });
@@ -187,6 +198,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             const recovered = await fetchProfileByUserId(nextSession.user.id);
             setProfile(recovered);
             if (!recovered) {
+              setProfile(guestProfileFor(nextSession.user));
               setProfileError("Profile not found in database");
             }
           }
@@ -196,7 +208,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         }
       } catch (err) {
         console.error("[Auth] profile hydrate failed", err);
-        setProfile(null);
+        setProfile(guestProfileFor(nextSession.user));
         setProfileError(
           err instanceof Error
             ? `Profile fetch failed: ${err.message}`
@@ -211,11 +223,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setLoading(true);
     setProfileError(null);
     try {
-      const { data } = await withTimeout(
-        async () => await supabase.auth.getSession(),
-        5000,
-        "Retry getSession",
-      );
+      const { data } = await supabase.auth.getSession();
+      console.log("[Auth] getSession completed");
       await applySession(data.session);
       if (data.session?.user) {
         const refreshed = await fetchProfileByUserId(data.session.user.id);
@@ -232,14 +241,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [applySession, fetchProfileByUserId]);
 
   useEffect(() => {
+    if (bootstrappedRef.current) return;
+    bootstrappedRef.current = true;
     let cancelled = false;
     void (async () => {
       try {
-        const { data } = await withTimeout(
-          async () => await supabase.auth.getSession(),
-          12000,
-          "Auth getSession",
-        );
+        const { data } = await supabase.auth.getSession();
+        console.log("[Auth] getSession completed");
         if (cancelled) return;
         await applySession(data.session);
       } catch (err) {

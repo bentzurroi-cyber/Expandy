@@ -30,15 +30,18 @@ export default function App() {
 
   if (loading) {
     return (
-      <div className="mx-auto flex min-h-dvh max-w-md flex-col items-center justify-center gap-3 px-4 text-sm text-muted-foreground">
-        <p>Loading account...</p>
+      <div
+        className="mx-auto flex min-h-dvh max-w-md flex-col items-center justify-center gap-3 px-4 text-center text-sm text-muted-foreground"
+        dir="rtl"
+      >
+        <p>טוען חשבון...</p>
         {showRetry ? (
           <button
             type="button"
             className="rounded-md border border-border px-3 py-1.5 text-xs text-foreground hover:bg-muted/40"
             onClick={() => void retryBootstrap()}
           >
-            Retry
+            נסה שוב
           </button>
         ) : null}
       </div>
