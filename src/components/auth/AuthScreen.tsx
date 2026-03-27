@@ -5,6 +5,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useAuth } from "@/context/AuthContext";
 import { supabase } from '../../lib/supabase';
+import { normalizeHouseholdCode } from "@/lib/household";
 
 export function AuthScreen() {
   const { signIn, signUp } = useAuth();
@@ -118,10 +119,11 @@ export function AuthScreen() {
                 <Input
                   id="auth-household"
                   value={householdId}
-                  onChange={(e) => setHouseholdId(e.target.value)}
+                  onChange={(e) => setHouseholdId(normalizeHouseholdCode(e.target.value))}
                   placeholder="קוד משק בית (אופציונלי)"
                   dir="rtl"
                   className="text-right placeholder:text-right"
+                  maxLength={6}
                 />
               </div>
             ) : null}

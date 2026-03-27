@@ -69,7 +69,7 @@ async function ensureProfile(
       userId: user.id,
       householdId: existing.household_id,
     });
-    if (!existing.household_id) {
+    if (!isValidHouseholdCode(existing.household_id ?? "")) {
       const assignedInput = householdId?.trim() || fallbackHouseholdId;
       const assigned = isValidHouseholdCode(assignedInput ?? "")
         ? normalizeHouseholdCode(assignedInput ?? "")
@@ -138,7 +138,7 @@ function guestProfileFor(user: User): ProfileRow {
   return {
     id: user.id,
     email: user.email?.trim().toLowerCase() ?? "",
-    household_id: "AAAAAA",
+    household_id: "",
     is_admin: false,
   };
 }

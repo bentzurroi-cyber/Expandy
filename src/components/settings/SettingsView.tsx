@@ -449,8 +449,9 @@ export function SettingsView() {
             <div className="flex gap-2">
               <Input
                 value={joinHouseholdId}
-                onChange={(e) => setJoinHouseholdId(e.target.value)}
-                placeholder={lang === "he" ? "הכנס מזהה משק בית" : "Enter household ID"}
+                onChange={(e) => setJoinHouseholdId(normalizeHouseholdCode(e.target.value))}
+                placeholder={lang === "he" ? "הכנס קוד משק בית (6 תווים)" : "Enter 6-character household code"}
+                maxLength={6}
               />
               <Button
                 type="button"

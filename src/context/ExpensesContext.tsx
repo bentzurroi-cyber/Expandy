@@ -44,6 +44,7 @@ import {
   EXPANDY_APP_DATA_STORAGE_KEYS,
   removeExpandyAppDataKeys,
 } from "@/lib/expandy-storage";
+import { isValidHouseholdCode, normalizeHouseholdCode } from "@/lib/household";
 
 const STORAGE_KEY = "expandy-expenses-v1";
 const STORAGE_INCOME_SOURCES = "expandy-income-sources-v1";
@@ -535,10 +536,16 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
   const waitForCloudContext = useCallback(async () => {
     // On wake-up, auth/profile can lag briefly; wait before writing.
     for (let i = 0; i < 16; i++) {
-      if (session && user?.id && profile?.household_id && !authLoading) {
+      const householdCode = normalizeHouseholdCode(profile?.household_id ?? "");
+      if (
+        session &&
+        user?.id &&
+        !authLoading &&
+        isValidHouseholdCode(householdCode)
+      ) {
         return {
           userId: user.id,
-          householdId: profile.household_id,
+          householdId: householdCode,
         };
       }
       await sleep(250);
