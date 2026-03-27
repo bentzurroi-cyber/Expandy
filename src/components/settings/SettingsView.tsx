@@ -62,6 +62,11 @@ import {
 import { SortableSettingsCategoryList } from "@/components/settings/SortableSettingsCategoryList";
 import { useAuth } from "@/context/AuthContext";
 import { supabase } from "@/lib/supabase";
+import {
+  doesHouseholdCodeExist,
+  generateUniqueHouseholdCode,
+  normalizeHouseholdCode,
+} from "@/lib/household";
 
 export function SettingsView() {
   const { lang, setLang, t, dir } = useI18n();
@@ -117,6 +122,7 @@ export function SettingsView() {
   const [newCurrencyCode, setNewCurrencyCode] = useState("");
   const [joinHouseholdId, setJoinHouseholdId] = useState("");
   const [joinLoading, setJoinLoading] = useState(false);
+  const [leaveLoading, setLeaveLoading] = useState(false);
   const [householdMembers, setHouseholdMembers] = useState<string[]>([]);
   const [membersLoading, setMembersLoading] = useState(false);
   const [membersError, setMembersError] = useState<string | null>(null);
@@ -319,9 +325,38 @@ export function SettingsView() {
   }
 
   async function onJoinHousehold() {
-    const nextId = joinHouseholdId.trim();
+    const nextId = normalizeHouseholdCode(joinHouseholdId);
     if (!nextId || !user?.id) return;
+    if (!/^[A-Z0-9]{6}$/.test(nextId)) {
+      window.alert(
+        lang === "he"
+          ? "אנא הזן קוד משק בית תקין בן 6 תווים."
+          : "Please enter a valid 6-character household code.",
+      );
+      return;
+    }
     setJoinLoading(true);
+    let exists = false;
+    try {
+      exists = await doesHouseholdCodeExist(nextId);
+    } catch (err) {
+      setJoinLoading(false);
+      window.alert(
+        lang === "he"
+          ? "לא הצלחנו לאמת את הקוד כרגע. נסה שוב בעוד רגע."
+          : "Could not validate the code right now. Please try again.",
+      );
+      return;
+    }
+    if (!exists) {
+      setJoinLoading(false);
+      window.alert(
+        lang === "he"
+          ? "לא מצאנו משק בית עם הקוד הזה. אפשר לנסות שוב בנחת."
+          : "We could not find a household with this code. Please try again.",
+      );
+      return;
+    }
     const { error } = await supabase
       .from("profiles")
       .update({ household_id: nextId })
@@ -342,6 +377,40 @@ export function SettingsView() {
         ? "הצטרפת בהצלחה למשק הבית. הנתונים המשותפים יתרעננו כעת."
         : "Joined household successfully. Shared data will refresh now.",
     );
+  }
+
+  async function onLeaveHousehold() {
+    if (!user?.id) return;
+    setLeaveLoading(true);
+    try {
+      const nextCode = await generateUniqueHouseholdCode(user.id);
+      const { error } = await supabase
+        .from("profiles")
+        .update({ household_id: nextCode })
+        .eq("id", user.id);
+      if (error) {
+        window.alert(
+          lang === "he"
+            ? `היציאה ממשק הבית נכשלה: ${error.message}`
+            : `Failed to leave household: ${error.message}`,
+        );
+        return;
+      }
+      await refreshProfile();
+      window.alert(
+        lang === "he"
+          ? `יצאת ממשק הבית. קוד המשק החדש שלך הוא ${nextCode}.`
+          : `You left the household. Your new code is ${nextCode}.`,
+      );
+    } catch (err) {
+      window.alert(
+        lang === "he"
+          ? "לא הצלחנו ליצור משק בית חדש כרגע. נסה שוב."
+          : "Could not create a new household right now. Please try again.",
+      );
+    } finally {
+      setLeaveLoading(false);
+    }
   }
 
   return (
@@ -433,6 +502,14 @@ export function SettingsView() {
           </div>
           <Button type="button" variant="outline" onClick={() => void signOut()}>
             Logout
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => void onLeaveHousehold()}
+            disabled={leaveLoading || !user?.id}
+          >
+            {lang === "he" ? (leaveLoading ? "יוצא..." : "עזיבת משק בית") : leaveLoading ? "Leaving..." : "Leave Household"}
           </Button>
         </CardContent>
       </Card>

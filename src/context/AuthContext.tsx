@@ -10,6 +10,13 @@ import {
 } from "react";
 import type { Session, User } from "@supabase/supabase-js";
 import { supabase, type ProfileRow } from "@/lib/supabase";
+import {
+  doesHouseholdCodeExist,
+  ensureHouseholdExists,
+  generateUniqueHouseholdCode,
+  isValidHouseholdCode,
+  normalizeHouseholdCode,
+} from "@/lib/household";
 
 type AuthContextValue = {
   user: User | null;
@@ -40,19 +47,11 @@ async function withTimeout<T>(run: () => Promise<T>, ms: number, label: string):
   ]);
 }
 
-function newHouseholdId() {
-  try {
-    return crypto.randomUUID();
-  } catch {
-    return `household-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
-  }
-}
-
 async function ensureProfile(
   user: User,
   householdId?: string,
   isAdmin = false,
-  fallbackHouseholdId = "roy-noy-home",
+  fallbackHouseholdId?: string,
 ) {
   const email = user.email?.trim().toLowerCase() ?? "";
   if (!email) return;
@@ -71,7 +70,11 @@ async function ensureProfile(
       householdId: existing.household_id,
     });
     if (!existing.household_id) {
-      const assigned = householdId?.trim() || fallbackHouseholdId;
+      const assignedInput = householdId?.trim() || fallbackHouseholdId;
+      const assigned = isValidHouseholdCode(assignedInput ?? "")
+        ? normalizeHouseholdCode(assignedInput ?? "")
+        : await generateUniqueHouseholdCode(user.id);
+      await ensureHouseholdExists(assigned, user.id);
       await supabase
         .from("profiles")
         .update({ household_id: assigned })
@@ -82,7 +85,15 @@ async function ensureProfile(
   }
   console.log("[Auth] Profile not found", { userId: user.id });
 
-  const resolvedHousehold = householdId?.trim() || fallbackHouseholdId;
+  const provided = normalizeHouseholdCode(householdId ?? "");
+  const shouldUseProvided =
+    provided.length === 6 && (await doesHouseholdCodeExist(provided).catch(() => false));
+  const resolvedHousehold = shouldUseProvided
+    ? provided
+    : isValidHouseholdCode(fallbackHouseholdId ?? "")
+      ? normalizeHouseholdCode(fallbackHouseholdId ?? "")
+      : await generateUniqueHouseholdCode(user.id);
+  await ensureHouseholdExists(resolvedHousehold, user.id);
 
   const { error: upsertError } = await supabase.from("profiles").upsert({
     id: user.id,
@@ -102,7 +113,8 @@ async function ensureProfile(
 async function forceCreateProfile(user: User): Promise<ProfileRow | null> {
   const email = user.email?.trim().toLowerCase() ?? "";
   if (!email) return null;
-  const assigned = newHouseholdId();
+  const assigned = await generateUniqueHouseholdCode(user.id);
+  await ensureHouseholdExists(assigned, user.id);
   const payload: ProfileRow = {
     id: user.id,
     email,
@@ -126,7 +138,7 @@ function guestProfileFor(user: User): ProfileRow {
   return {
     id: user.id,
     email: user.email?.trim().toLowerCase() ?? "",
-    household_id: "roy-noy-home",
+    household_id: "AAAAAA",
     is_admin: false,
   };
 }
@@ -195,7 +207,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             setProfile(forced);
             setProfileError(null);
           } else {
-            await ensureProfile(nextSession.user, "roy-noy-home", false, "roy-noy-home");
+            await ensureProfile(nextSession.user);
             const recovered = await fetchProfileByUserId(nextSession.user.id);
             setProfile(recovered);
             if (!recovered) {

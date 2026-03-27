@@ -2,12 +2,37 @@
 
 create extension if not exists "pgcrypto";
 
+create table if not exists public.households (
+  code text primary key,
+  created_by uuid references auth.users (id) on delete set null,
+  created_at timestamptz not null default now(),
+  check (code ~ '^[A-Z0-9]{6}$')
+);
+
 create table if not exists public.profiles (
   id uuid primary key references auth.users (id) on delete cascade,
   email text not null unique,
   household_id text not null,
   is_admin boolean not null default false
 );
+
+insert into public.households (code)
+select distinct p.household_id
+from public.profiles p
+where p.household_id ~ '^[A-Z0-9]{6}$'
+on conflict (code) do nothing;
+
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+    where conname = 'profiles_household_fk'
+  ) then
+    alter table public.profiles
+      add constraint profiles_household_fk
+      foreign key (household_id) references public.households (code);
+  end if;
+end $$;
 
 create table if not exists public.expenses (
   id text primary key,
@@ -66,10 +91,19 @@ create index if not exists idx_assets_household_date on public.assets (household
 create index if not exists idx_categories_household_type on public.categories (household_id, type);
 
 alter table public.profiles enable row level security;
+alter table public.households enable row level security;
 alter table public.expenses enable row level security;
 alter table public.assets enable row level security;
 alter table public.categories enable row level security;
 alter table public.settings enable row level security;
+
+drop policy if exists "households_select_authenticated" on public.households;
+create policy "households_select_authenticated" on public.households
+for select using (auth.uid() is not null);
+
+drop policy if exists "households_insert_authenticated" on public.households;
+create policy "households_insert_authenticated" on public.households
+for insert with check (auth.uid() is not null);
 
 -- profiles: users can read/write their profile.
 drop policy if exists "profiles_select_own" on public.profiles;
@@ -147,12 +181,25 @@ language plpgsql
 security definer
 set search_path = public
 as $$
+declare
+  generated_code text;
 begin
+  -- Generate a unique 6-char household code.
+  loop
+    generated_code := substring(translate(encode(gen_random_bytes(6), 'base64'), '+/=', 'XYZ') from 1 for 6);
+    generated_code := upper(regexp_replace(generated_code, '[^A-Z0-9]', 'A', 'g'));
+    exit when generated_code ~ '^[A-Z0-9]{6}$'
+      and not exists (select 1 from public.households h where h.code = generated_code);
+  end loop;
+  insert into public.households (code, created_by)
+  values (generated_code, new.id)
+  on conflict (code) do nothing;
+
   insert into public.profiles (id, email, household_id, is_admin)
   values (
     new.id,
     coalesce(lower(new.email), ''),
-    gen_random_uuid()::text,
+    generated_code,
     false
   )
   on conflict (id) do nothing;

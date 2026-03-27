@@ -11,7 +11,7 @@ export function AuthScreen() {
   const [mode, setMode] = useState<"login" | "signup">("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [householdId, setHouseholdId] = useState("roy-noy-home");
+  const [householdId, setHouseholdId] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -119,10 +119,9 @@ export function AuthScreen() {
                   id="auth-household"
                   value={householdId}
                   onChange={(e) => setHouseholdId(e.target.value)}
-                  placeholder="מזהה משק בית"
+                  placeholder="קוד משק בית (אופציונלי)"
                   dir="rtl"
                   className="text-right placeholder:text-right"
-                  required
                 />
               </div>
             ) : null}
