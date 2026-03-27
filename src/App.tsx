@@ -28,6 +28,10 @@ export default function App() {
     return () => window.clearTimeout(timer);
   }, [loading]);
 
+  // If there is no authenticated user, always show auth screen immediately.
+  // This avoids getting stuck on the loading view right after logout.
+  if (!user) return <AuthScreen />;
+
   if (loading) {
     return (
       <div
@@ -47,8 +51,6 @@ export default function App() {
       </div>
     );
   }
-
-  if (!user) return <AuthScreen />;
 
   return (
     <>

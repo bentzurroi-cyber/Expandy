@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Eye, EyeOff } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -12,6 +13,7 @@ export function AuthScreen() {
   const [mode, setMode] = useState<"login" | "signup">("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
   const [householdId, setHouseholdId] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -100,18 +102,28 @@ export function AuthScreen() {
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="auth-pass" className="text-right">סיסמה</Label>
-              <Input
-                id="auth-pass"
-                type="password"
-                autoComplete={mode === "login" ? "current-password" : "new-password"}
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="סיסמה"
-                dir="rtl"
-                className="text-right placeholder:text-right"
-                required
-                minLength={6}
-              />
+              <div className="relative">
+                <Input
+                  id="auth-pass"
+                  type={showPassword ? "text" : "password"}
+                  autoComplete={mode === "login" ? "current-password" : "new-password"}
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="סיסמה"
+                  dir="rtl"
+                  className="text-right placeholder:text-right pe-10"
+                  required
+                  minLength={6}
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword((v) => !v)}
+                  className="absolute inset-y-0 left-2 my-auto inline-flex h-7 w-7 items-center justify-center rounded text-muted-foreground hover:bg-muted/60 hover:text-foreground"
+                  aria-label={showPassword ? "הסתר סיסמה" : "הצג סיסמה"}
+                >
+                  {showPassword ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+                </button>
+              </div>
             </div>
             {mode === "signup" ? (
               <div className="space-y-1.5">

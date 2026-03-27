@@ -64,13 +64,13 @@ import { useAuth } from "@/context/AuthContext";
 import { supabase } from "@/lib/supabase";
 import {
   doesHouseholdCodeExist,
-  generateUniqueHouseholdCode,
+  isValidHouseholdCode,
   normalizeHouseholdCode,
 } from "@/lib/household";
 
 export function SettingsView() {
   const { lang, setLang, t, dir } = useI18n();
-  const { user, profile, signOut, refreshProfile } = useAuth();
+  const { user, profile, refreshProfile } = useAuth();
   const { getBudget, setBudget, clearAllUserData: clearBudgetData } =
     useBudgets();
   const {
@@ -126,6 +126,49 @@ export function SettingsView() {
   const [householdMembers, setHouseholdMembers] = useState<string[]>([]);
   const [membersLoading, setMembersLoading] = useState(false);
   const [membersError, setMembersError] = useState<string | null>(null);
+  const [autoFixingHouseholdCode, setAutoFixingHouseholdCode] = useState(false);
+  const [displayHouseholdCode, setDisplayHouseholdCode] = useState("");
+
+  function randomHouseholdCode6(): string {
+    const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    let out = "";
+    for (let i = 0; i < 6; i += 1) {
+      out += alphabet[Math.floor(Math.random() * alphabet.length)];
+    }
+    return out;
+  }
+
+  function generateRandomCode(length: number): string {
+    const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    let out = "";
+    for (let i = 0; i < length; i += 1) {
+      out += alphabet[Math.floor(Math.random() * alphabet.length)];
+    }
+    return out;
+  }
+
+  async function allocateNewHouseholdCode(userId: string): Promise<string> {
+    for (let i = 0; i < 40; i += 1) {
+      const code = randomHouseholdCode6();
+      const { error } = await supabase.from("households").insert({
+        code,
+        created_by: userId,
+      });
+      if (!error) return code;
+      console.error("[Settings] households insert failed", {
+        attempt: i + 1,
+        code,
+        error: error.message,
+      });
+      if (error.code === "23505") continue;
+      throw new Error(error.message);
+    }
+    throw new Error("Could not allocate new household code");
+  }
+
+  useEffect(() => {
+    setDisplayHouseholdCode(normalizeHouseholdCode(profile?.household_id ?? ""));
+  }, [profile?.household_id]);
 
   useEffect(() => {
     async function loadMembers() {
@@ -160,6 +203,34 @@ export function SettingsView() {
     }
     void loadMembers();
   }, [lang, profile?.household_id]);
+
+  useEffect(() => {
+    async function migrateLegacyHouseholdCode() {
+      if (!user?.id || !profile?.household_id) return;
+      if (isValidHouseholdCode(profile.household_id)) return;
+      setAutoFixingHouseholdCode(true);
+      try {
+        const newCode = await allocateNewHouseholdCode(user.id);
+        const { error } = await supabase
+          .from("profiles")
+          .update({ household_id: newCode })
+          .eq("id", user.id);
+        if (error) {
+          console.error("[Settings] legacy household code migration failed", {
+            userId: user.id,
+            error: error.message,
+          });
+          return;
+        }
+        await refreshProfile();
+      } catch (err) {
+        console.error("[Settings] auto-fix household code crashed", err);
+      } finally {
+        setAutoFixingHouseholdCode(false);
+      }
+    }
+    void migrateLegacyHouseholdCode();
+  }, [profile?.household_id, refreshProfile, user?.id]);
 
   const csvLookup = useMemo<CsvLookup>(
     () => ({
@@ -379,34 +450,58 @@ export function SettingsView() {
     );
   }
 
-  async function onLeaveHousehold() {
+  async function handleLogout() {
+    try {
+      const { error } = await supabase.auth.signOut();
+      if (error) throw error;
+      window.location.href = "/";
+    } catch (err) {
+      console.error("[Settings] handleLogout crashed", err);
+      window.alert(
+        `Logout Error: ${err instanceof Error ? err.message : "Unknown logout error"}`,
+      );
+    }
+  }
+
+  async function handleLeaveHousehold() {
     if (!user?.id) return;
     setLeaveLoading(true);
     try {
-      const nextCode = await generateUniqueHouseholdCode(user.id);
-      const { error } = await supabase
-        .from("profiles")
-        .update({ household_id: nextCode })
-        .eq("id", user.id);
-      if (error) {
-        window.alert(
-          lang === "he"
-            ? `היציאה ממשק הבית נכשלה: ${error.message}`
-            : `Failed to leave household: ${error.message}`,
-        );
+      const newCode = generateRandomCode(6); // generate code
+      const { error: insertError } = await supabase
+        .from("households")
+        .insert({ code: newCode, created_by: user.id });
+      if (insertError) {
+        window.alert(`Insert Error: ${insertError.message}`);
         return;
       }
+
+      const { error: updateError } = await supabase
+        .from("profiles")
+        .update({ household_id: newCode })
+        .eq("id", user.id);
+      if (updateError) {
+        window.alert(`Update Error: ${updateError.message}`);
+        return;
+      }
+
+      // Update UI state here
+      setDisplayHouseholdCode(newCode);
       await refreshProfile();
       window.alert(
         lang === "he"
-          ? `יצאת ממשק הבית. קוד המשק החדש שלך הוא ${nextCode}.`
-          : `You left the household. Your new code is ${nextCode}.`,
+          ? `עודכן קוד משק בית חדש: ${newCode}`
+          : `New household code updated: ${newCode}`,
       );
     } catch (err) {
+      console.error("[Settings] handleLeaveHousehold failed", {
+        userId: user?.id,
+        err,
+      });
       window.alert(
-        lang === "he"
-          ? "לא הצלחנו ליצור משק בית חדש כרגע. נסה שוב."
-          : "Could not create a new household right now. Please try again.",
+        `Leave Household Error: ${
+          err instanceof Error ? err.message : "Unknown household leave error"
+        }`,
       );
     } finally {
       setLeaveLoading(false);
@@ -430,7 +525,15 @@ export function SettingsView() {
               {lang === "he" ? "מזהה משק בית" : "Household ID"}
             </p>
             <div className="flex items-center justify-between gap-2 text-right">
-              <p className="text-sm">{profile?.household_id ?? "-"}</p>
+              <p className="text-sm">
+                {autoFixingHouseholdCode
+                  ? lang === "he"
+                    ? "מעדכן קוד..."
+                    : "Updating code..."
+                  : displayHouseholdCode
+                    ? displayHouseholdCode
+                    : "-"}
+              </p>
               <Button
                 type="button"
                 size="sm"
@@ -501,13 +604,13 @@ export function SettingsView() {
               </ul>
             )}
           </div>
-          <Button type="button" variant="outline" onClick={() => void signOut()}>
-            Logout
+          <Button type="button" variant="outline" onClick={() => void handleLogout()}>
+            {lang === "he" ? "התנתקות" : "Logout"}
           </Button>
           <Button
             type="button"
             variant="outline"
-            onClick={() => void onLeaveHousehold()}
+            onClick={() => void handleLeaveHousehold()}
             disabled={leaveLoading || !user?.id}
           >
             {lang === "he" ? (leaveLoading ? "יוצא..." : "עזיבת משק בית") : leaveLoading ? "Leaving..." : "Leave Household"}
