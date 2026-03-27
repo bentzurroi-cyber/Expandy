@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Download, Trash2 } from "lucide-react";
 import { downloadExpensesCsv, type CsvLookup } from "@/lib/exportCsv";
 import { Button } from "@/components/ui/button";
@@ -117,6 +117,43 @@ export function SettingsView() {
   const [newCurrencyCode, setNewCurrencyCode] = useState("");
   const [joinHouseholdId, setJoinHouseholdId] = useState("");
   const [joinLoading, setJoinLoading] = useState(false);
+  const [householdMembers, setHouseholdMembers] = useState<string[]>([]);
+  const [membersLoading, setMembersLoading] = useState(false);
+  const [membersError, setMembersError] = useState<string | null>(null);
+
+  useEffect(() => {
+    async function loadMembers() {
+      if (!profile?.household_id) {
+        setHouseholdMembers([]);
+        setMembersError(null);
+        setMembersLoading(false);
+        return;
+      }
+      setMembersLoading(true);
+      setMembersError(null);
+      const { data, error } = await supabase
+        .from("profiles")
+        .select("email")
+        .eq("household_id", profile.household_id)
+        .order("email", { ascending: true });
+      if (error) {
+        setHouseholdMembers([]);
+        setMembersError(
+          lang === "he"
+            ? `טעינת חברי משק הבית נכשלה: ${error.message}`
+            : `Failed to load household members: ${error.message}`,
+        );
+        setMembersLoading(false);
+        return;
+      }
+      const emails = (data ?? [])
+        .map((row) => (typeof row.email === "string" ? row.email.trim() : ""))
+        .filter(Boolean);
+      setHouseholdMembers(emails);
+      setMembersLoading(false);
+    }
+    void loadMembers();
+  }, [lang, profile?.household_id]);
 
   const csvLookup = useMemo<CsvLookup>(
     () => ({
@@ -369,6 +406,30 @@ export function SettingsView() {
                   ? `Household Active: Linked (#${profile.household_id})`
                   : "Household Active: Not linked"}
             </p>
+          </div>
+          <div className="space-y-2 rounded-lg border border-border/70 px-3 py-3" dir="rtl">
+            <p className="text-xs text-muted-foreground">חברי משק הבית</p>
+            {membersLoading ? (
+              <p className="text-sm text-muted-foreground">טוען חברים...</p>
+            ) : membersError ? (
+              <p className="text-sm text-destructive">{membersError}</p>
+            ) : householdMembers.length === 0 ? (
+              <p className="text-sm text-muted-foreground">אין חברים להצגה כרגע.</p>
+            ) : (
+              <ul className="space-y-1">
+                {householdMembers.map((email) => (
+                  <li
+                    key={email}
+                    className="rounded-md border border-border/60 px-2 py-1.5 text-sm"
+                  >
+                    {email}
+                    {user?.email?.trim().toLowerCase() === email.trim().toLowerCase()
+                      ? " (אני)"
+                      : ""}
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
           <Button type="button" variant="outline" onClick={() => void signOut()}>
             Logout

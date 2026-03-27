@@ -373,7 +373,7 @@ type ExpensesContextValue = {
   expensesForMonth: (ym: `${number}-${number}`) => Expense[];
   /** Ensure recurring templates are instantiated into state for a month. */
   materializeRecurringForMonth: (ym: `${number}-${number}`) => void;
-  addExpense: (input: Omit<Expense, "id">) => void;
+  addExpense: (input: Omit<Expense, "id">) => Promise<{ ok: true } | { ok: false; error: string }>;
   /** CSV import (Hebrew headers) with strict dedupe */
   importData: (
     rows: RawImportedEntry[],
@@ -836,43 +836,16 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
     incomeCategoryOrder,
   ]);
 
-  const addExpense = useCallback((input: Omit<Expense, "id">) => {
-    const persistRow = (row: Expense) => {
-      void (async () => {
-        const cloud = await waitForCloudContext();
-        if (!cloud) {
-          console.error("[Expenses] Skipped cloud write (auth/session unavailable on wake-up)", {
-            expenseId: row.id,
-          });
-          return;
-        }
-        const { error } = await supabase.from("expenses").upsert({
-        id: row.id,
-        user_id: cloud.userId,
-        household_id: cloud.householdId,
-        amount: row.amount,
-        category: row.categoryId,
-        date: row.date,
-        note: row.note,
-        currency: row.currency,
-        is_verified: row.isVerified === true,
-        installments_info: {
-          installmentIndex: row.installmentIndex,
-          installments: row.installments,
-          paymentMethodId: row.paymentMethodId,
-          type: row.type,
-        },
-        is_recurring: row.recurringMonthly === true,
-        });
-        if (error) {
-          console.error("[Expenses] Cloud write failed", { expenseId: row.id, error: error.message });
-        }
-      })();
-    };
+  const addExpense = useCallback(async (input: Omit<Expense, "id">) => {
+    const cloud = await waitForCloudContext();
+    if (!cloud) {
+      return { ok: false as const, error: "אין חיבור לחשבון. נסה שוב בעוד רגע." };
+    }
+
+    let rows: Expense[] = [];
     if (input.type === "expense" && input.recurringMonthly) {
       const count = Math.max(1, Math.floor(input.installments > 1 ? input.installments : 12));
       const originalId = newId();
-      const rows: Expense[] = [];
       for (let i = 0; i < count; i++) {
         const installNote = `(תשלום ${i + 1} מתוך ${count})`;
         const baseNote = input.note.trim();
@@ -887,15 +860,10 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
           recurringMonthly: false,
         });
       }
-      setExpenses((prev) => [...prev, ...rows]);
-      rows.forEach(persistRow);
-      return;
-    }
-    if (input.type === "expense" && input.installments > 1) {
+    } else if (input.type === "expense" && input.installments > 1) {
       const count = Math.max(1, Math.floor(input.installments));
       const unit = Math.round((input.amount / count) * 100) / 100;
       const originalId = newId();
-      const rows: Expense[] = [];
       for (let i = 0; i < count; i++) {
         const baseNote = input.note.trim();
         const installNote = `(תשלום ${i + 1} מתוך ${count})`;
@@ -909,13 +877,36 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
           installmentIndex: i + 1,
         });
       }
-      setExpenses((prev) => [...prev, ...rows]);
-      rows.forEach(persistRow);
-      return;
+    } else {
+      rows = [{ ...input, id: newId() }];
     }
-    const row = { ...input, id: newId() };
-    setExpenses((prev) => [...prev, row]);
-    persistRow(row);
+
+    const payload = rows.map((row) => ({
+      id: row.id,
+      user_id: cloud.userId,
+      household_id: cloud.householdId,
+      amount: row.amount,
+      category: row.categoryId,
+      date: row.date,
+      note: row.note,
+      currency: row.currency,
+      is_verified: row.isVerified === true,
+      installments_info: {
+        installmentIndex: row.installmentIndex,
+        installments: row.installments,
+        paymentMethodId: row.paymentMethodId,
+        type: row.type,
+      },
+      is_recurring: row.recurringMonthly === true,
+    }));
+    const { error } = await supabase.from("expenses").upsert(payload);
+    if (error) {
+      console.error("[Expenses] Cloud write failed", { error: error.message });
+      return { ok: false as const, error: `שמירה לענן נכשלה: ${error.message}` };
+    }
+
+    setExpenses((prev) => [...prev, ...rows]);
+    return { ok: true as const };
   }, [waitForCloudContext]);
 
   const materializeRecurringForMonth = useCallback(

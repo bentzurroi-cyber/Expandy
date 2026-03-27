@@ -131,7 +131,7 @@ export const he = {
 
   settingsTitle: "הגדרות",
   settingsSubtitleLead:
-    "ניהול תקציבים וייצוא נתונים. הכל נשמר במכשיר זה בלבד (הדגמה).",
+    "ניהול תקציבים וייצוא נתונים.",
   settingsExportDescription:
     "בחרו תקופה וייצאו לקובץ Excel (.xlsx) — ניתן לפתיחה ב-Excel או ב-Google Sheets.",
   exportPeriodLabel: "תקופת ייצוא",

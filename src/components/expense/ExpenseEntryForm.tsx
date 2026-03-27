@@ -106,14 +106,14 @@ export function ExpenseEntryForm() {
     setCurrency(value);
   }
 
-  function onSubmit(e: React.FormEvent) {
+  async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
     const parsed = parseNumericInput(amount);
     if (parsed == null || !Number.isFinite(parsed) || parsed <= 0) {
       setHint(t.amountInvalid);
       return;
     }
-    addExpense({
+    const result = await addExpense({
       date: txDate,
       amount: Math.round(parsed * 100) / 100,
       currency,
@@ -125,11 +125,15 @@ export function ExpenseEntryForm() {
       installmentIndex: 1,
       recurringMonthly,
     });
+    if (!result.ok) {
+      setHint(result.error);
+      return;
+    }
     setAmount("");
     setNote("");
     setInstallments(1);
     setRecurringMonthly(false);
-    setHint(t.hintSavedMock);
+    setHint("ההוצאה נשמרה בהצלחה בענן.");
     setTimeout(() => setHint(null), 3200);
   }
 
