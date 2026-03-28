@@ -142,6 +142,28 @@ export const he = {
   settingsBudgetLabel: "תקרה חודשית (₪)",
   settingsSaveNote: "השינויים נשמרים אוטומטית.",
 
+  installAppSectionTitle: "התקנה במכשיר",
+  installAppSectionDesc:
+    "התקינו את Expandy למסך הבית לפתיחה במצב אפליקציה — בלי סרגל כתובות.",
+  installAppGuidelinesButton: "הנחיות",
+  installAppDialogTitle: "הנחיות התקנה",
+  installAppButton: "התקן אפליקציה",
+  installAppAndroidChromeNote:
+    "התקנה בלחיצה אחת זמינה ב־Chrome באנדרואיד (ובדפדפנים נתמכים אחרים). ב־iPhone השתמשו בהנחיות למעלה.",
+  installAppInstructionsLead: "הוראות לפי דפדפן:",
+  installAppChromeSectionTitle: "עבור Chrome / אנדרואיד",
+  installAppChromeBullet1:
+    "במסך זה לחצו על «התקן אפליקציה» (מתחת לכפתור ההנחיות).",
+  installAppChromeBullet2:
+    "אם אין חלונית, פתחו את תפריט הדפדפן (שלוש נקודות) ובחרו «התקן אפליקציה».",
+  installAppSafariSectionTitle: "עבור Safari / אייפון (iOS)",
+  installAppSafariBullet1:
+    "לחצו על סמל השיתוף (ריבוע עם חץ למעלה) בסרגל הכלים.",
+  installAppSafariBullet2: "גללו מטה ובחרו «הוסף למסך הבית».",
+  installAppAlreadyInstalled: "האפליקציה כבר פועלת במצב מסך מלא.",
+  installAppDesktopHint:
+    "להתקנה במחשב: השתמשו בתפריט הדפדפן (כרום / אדג') ובחרו התקנת אפליקציה או יצירת קיצור.",
+
   manageCategories: "ניהול קטגוריות",
   manageCategoriesDesc: "עריכה/מחיקה של קטגוריות והאייקונים שלהן (נשמר מקומית).",
   categoryNameLabel: "שם קטגוריה",

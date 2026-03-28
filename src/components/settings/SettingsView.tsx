@@ -59,6 +59,7 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
+import { InstallAppCard } from "@/components/settings/InstallAppCard";
 import { SortableSettingsCategoryList } from "@/components/settings/SortableSettingsCategoryList";
 import { useAuth } from "@/context/AuthContext";
 import { supabase } from "@/lib/supabase";
@@ -216,7 +217,8 @@ export function SettingsView() {
   }, [leaveConfirmOpen, profile?.household_id]);
 
   const loadHouseholdMembers = useCallback(async () => {
-    if (!profile?.household_id) {
+    const code = normalizeHouseholdCode(profile?.household_id ?? "");
+    if (!isValidHouseholdCode(code)) {
       setHouseholdMembers([]);
       setMembersError(null);
       setMembersLoading(false);
@@ -226,8 +228,8 @@ export function SettingsView() {
     setMembersError(null);
     const { data, error } = await supabase
       .from("profiles")
-      .select("email")
-      .eq("household_id", profile.household_id)
+      .select("*")
+      .eq("household_id", code)
       .order("email", { ascending: true });
     if (error) {
       setHouseholdMembers([]);
@@ -245,6 +247,29 @@ export function SettingsView() {
     setHouseholdMembers(emails);
     setMembersLoading(false);
   }, [lang, profile?.household_id]);
+
+  useEffect(() => {
+    if (!user?.id) return;
+    let t: ReturnType<typeof setTimeout> | undefined;
+    const schedule = () => {
+      if (t !== undefined) clearTimeout(t);
+      t = setTimeout(() => {
+        void loadHouseholdMembers();
+      }, 400);
+    };
+    const channel = supabase
+      .channel(`profiles-members-sync-${user.id}`)
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "profiles" },
+        schedule,
+      )
+      .subscribe();
+    return () => {
+      if (t !== undefined) clearTimeout(t);
+      void supabase.removeChannel(channel);
+    };
+  }, [user?.id, loadHouseholdMembers]);
 
   useEffect(() => {
     void loadHouseholdMembers();
@@ -546,6 +571,7 @@ export function SettingsView() {
       setJoinHouseholdId("");
       setPendingJoinCode("");
       setJoinConfirmOpen(false);
+      void loadHouseholdMembers();
       window.alert(
         lang === "he"
           ? "הצטרפת בהצלחה למשק הבית. הנתונים המשותפים מוכנים."
@@ -633,6 +659,7 @@ export function SettingsView() {
       setDisplayHouseholdCode(newCode);
       await refreshProfile();
       setLeaveConfirmOpen(false);
+      void loadHouseholdMembers();
       window.alert(
         lang === "he"
           ? `עודכן קוד משק בית חדש: ${newCode}`
@@ -667,15 +694,15 @@ export function SettingsView() {
         </CardHeader>
         <CardContent className="space-y-3">
           <div className="space-y-1 rounded-lg border border-border/70 px-3 py-2">
-            <p className="text-xs text-muted-foreground">Email</p>
-            <p className="text-sm">{user?.email ?? "-"}</p>
+            <p className="text-sm leading-relaxed text-muted-foreground">Email</p>
+            <p className="text-base leading-relaxed">{user?.email ?? "-"}</p>
           </div>
           <div className="space-y-1 rounded-lg border border-border/70 px-3 py-2">
-            <p className="text-xs text-muted-foreground">
+            <p className="text-sm leading-relaxed text-muted-foreground">
               {lang === "he" ? "מזהה משק בית" : "Household ID"}
             </p>
             <div className="flex items-center justify-between gap-2 text-right">
-              <p className="text-sm">
+              <p className="text-base leading-relaxed">
                 {autoFixingHouseholdCode
                   ? lang === "he"
                     ? "מעדכן קוד..."
@@ -696,7 +723,7 @@ export function SettingsView() {
             </div>
           </div>
           <div className="space-y-2 rounded-lg border border-border/70 px-3 py-3">
-            <p className="text-xs text-muted-foreground">
+            <p className="text-sm leading-relaxed text-muted-foreground">
               {lang === "he" ? "הצטרפות למשק בית קיים" : "Join Household"}
             </p>
             <div className="flex gap-2">
@@ -720,7 +747,7 @@ export function SettingsView() {
                     : "Join Household"}
               </Button>
             </div>
-            <p className="text-xs text-muted-foreground">
+            <p className="text-sm leading-relaxed text-muted-foreground">
               {lang === "he"
                 ? profile?.household_id
                   ? "מצב סנכרון: פעיל ומחובר"
@@ -731,19 +758,19 @@ export function SettingsView() {
             </p>
           </div>
           <div className="space-y-2 rounded-lg border border-border/70 px-3 py-3" dir="rtl">
-            <p className="text-xs text-muted-foreground">חברי משק הבית</p>
+            <p className="text-sm leading-relaxed text-muted-foreground">חברי משק הבית</p>
             {membersLoading ? (
-              <p className="text-sm text-muted-foreground">טוען חברים...</p>
+              <p className="text-base leading-relaxed text-muted-foreground">טוען חברים...</p>
             ) : membersError ? (
-              <p className="text-sm text-destructive">{membersError}</p>
+              <p className="text-base leading-relaxed text-destructive">{membersError}</p>
             ) : householdMembers.length === 0 ? (
-              <p className="text-sm text-muted-foreground">אין חברים להצגה כרגע.</p>
+              <p className="text-base leading-relaxed text-muted-foreground">אין חברים להצגה כרגע.</p>
             ) : (
               <ul className="space-y-1">
                 {householdMembers.map((email) => (
                   <li
                     key={email}
-                    className="rounded-md border border-border/60 px-2 py-1.5 text-sm"
+                    className="rounded-md border border-border/60 px-2.5 py-2 text-base leading-relaxed"
                   >
                     {email}
                     {user?.email?.trim().toLowerCase() === email.trim().toLowerCase()
@@ -796,6 +823,8 @@ export function SettingsView() {
           </Select>
         </CardContent>
       </Card>
+
+      <InstallAppCard />
 
       <Card className="border-border/80 shadow-none">
         <CardHeader className="space-y-1">
@@ -1038,7 +1067,7 @@ export function SettingsView() {
                 type="button"
                 variant="ghost"
                 size="sm"
-                className="w-full text-xs text-muted-foreground"
+                className="w-full text-sm leading-relaxed text-muted-foreground"
                 onClick={() =>
                   setShowAllExpenseCategoriesSettings((v) => !v)
                 }
@@ -1150,7 +1179,7 @@ export function SettingsView() {
                 type="button"
                 variant="ghost"
                 size="sm"
-                className="w-full text-xs text-muted-foreground"
+                className="w-full text-sm leading-relaxed text-muted-foreground"
                 onClick={() =>
                   setShowAllIncomeCategoriesSettings((v) => !v)
                 }
@@ -1246,7 +1275,7 @@ export function SettingsView() {
                     type="button"
                     variant="ghost"
                     size="sm"
-                    className="w-full text-xs text-muted-foreground"
+                    className="w-full text-sm leading-relaxed text-muted-foreground"
                     onClick={() =>
                       setShowAllAssetTypesSettings((v) => !v)
                     }
@@ -1265,7 +1294,7 @@ export function SettingsView() {
       <Card className="border-border/80 shadow-none">
         <CardHeader className="space-y-1 px-4 pb-2 pt-4">
           <CardTitle className="text-base">{t.settingsBudgetsSection}</CardTitle>
-          <CardDescription className="text-xs">
+          <CardDescription className="text-sm leading-relaxed">
             {t.settingsBudgetsSectionDesc}
           </CardDescription>
         </CardHeader>
@@ -1324,7 +1353,7 @@ export function SettingsView() {
                 type="button"
                 variant="ghost"
                 size="sm"
-                className="w-full text-xs text-muted-foreground"
+                className="w-full text-sm leading-relaxed text-muted-foreground"
                 onClick={() => setShowAllBudgetSettings((v) => !v)}
               >
                 {showAllBudgetSettings
@@ -1333,7 +1362,7 @@ export function SettingsView() {
               </Button>
             </div>
           ) : null}
-          <p className="border-t border-border/50 px-4 py-3 text-xs text-muted-foreground">
+          <p className="border-t border-border/50 px-4 py-3 text-sm leading-relaxed text-muted-foreground">
             {t.settingsSaveNote}
           </p>
         </CardContent>
@@ -1461,7 +1490,7 @@ export function SettingsView() {
               בחר אם להתחיל דף חדש או לקחת איתך את הנתונים שיצרת.
             </AlertDialogDescription>
             {leaveDialogMemberCount !== null && leaveDialogMemberCount > 1 ? (
-              <p className="mt-3 border-t border-border pt-3 text-xs text-muted-foreground">
+              <p className="mt-3 border-t border-border pt-3 text-sm leading-relaxed text-muted-foreground">
                 {lang === "he" ? (
                   <>
                     שים לב: שאר חברי משק הבית יישארו בבית זה ויוכלו להמשיך לראות את המידע שלא בחרת

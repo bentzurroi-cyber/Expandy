@@ -54,17 +54,20 @@ export function MonthYearPicker({
           id={id}
           type="button"
           variant="outline"
-          className={cn("w-full justify-between", triggerClassName)}
+          className={cn(
+            "min-h-11 w-full justify-between px-3.5 text-base font-normal leading-relaxed",
+            triggerClassName,
+          )}
         >
-          <span>{display}</span>
+          <span className="truncate">{display}</span>
         </Button>
       </PopoverTrigger>
-      <PopoverContent dir={dir} className="w-[min(92vw,22rem)] p-3">
-        <div className="mb-2 flex items-center justify-between">
+      <PopoverContent dir={dir} className="w-[min(92vw,22rem)] p-4">
+        <div className="mb-3 flex items-center justify-between">
           <Button type="button" size="icon" variant="ghost" onClick={() => setYear((y) => y - 1)}>
             <ChevronRight className="size-4" />
           </Button>
-          <span className="text-sm font-medium tabular-nums">{year}</span>
+          <span className="text-base font-medium tabular-nums leading-relaxed">{year}</span>
           <Button type="button" size="icon" variant="ghost" onClick={() => setYear((y) => y + 1)}>
             <ChevronLeft className="size-4" />
           </Button>
@@ -73,7 +76,7 @@ export function MonthYearPicker({
           <Button
             type="button"
             variant={value === "all" ? "secondary" : "ghost"}
-            className="mb-2 w-full"
+            className="mb-2 w-full text-base font-normal leading-relaxed"
             onClick={() => {
               onChange("all");
               setOpen(false);
@@ -88,7 +91,7 @@ export function MonthYearPicker({
               key={m.ym}
               type="button"
               variant={value === m.ym ? "secondary" : "ghost"}
-              className="h-9"
+              className="h-10 text-base font-normal leading-relaxed"
               onClick={() => {
                 onChange(m.ym);
                 setOpen(false);

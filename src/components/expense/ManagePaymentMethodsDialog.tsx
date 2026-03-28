@@ -123,7 +123,7 @@ export function ManagePaymentMethodsDialog({
                       {m.name}
                     </span>
                     {m.id === selectedId ? (
-                      <span className="shrink-0 text-xs text-muted-foreground">
+                      <span className="shrink-0 text-sm leading-relaxed text-muted-foreground">
                         {lang === "he" ? "נבחר" : "Selected"}
                       </span>
                     ) : null}
@@ -201,7 +201,7 @@ export function ManagePaymentMethodsDialog({
                 {t.add}
               </Button>
             </div>
-            <p className="mt-2 text-xs text-muted-foreground">
+            <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
               {lang === "he"
                 ? "טיפ: אחרי יצירה אפשר לערוך צבע ואייקון."
                 : "Tip: after creating, you can edit color and icon."}

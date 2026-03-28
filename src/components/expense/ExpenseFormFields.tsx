@@ -468,7 +468,7 @@ export function ExpenseFormFields({
   }) => (
     <div
       className={cn(
-        "flex w-full min-h-[3.5rem] items-center justify-between gap-3",
+        "flex w-full min-h-[3.5rem] items-center justify-between gap-3 text-base leading-relaxed",
         rowPad,
         className,
       )}
@@ -498,7 +498,7 @@ export function ExpenseFormFields({
         {renderCategoryGrid ? (
           <>
             <div className="px-5 py-5">
-              <div className="mb-3 flex items-center justify-between gap-2 text-sm text-muted-foreground">
+              <div className="mb-3 flex items-center justify-between gap-2 text-base leading-relaxed text-muted-foreground">
                 <div className="flex items-center gap-2">
                   <CategoryGlyph
                     iconKey={selectedCategory?.iconKey ?? "tag"}
@@ -513,18 +513,18 @@ export function ExpenseFormFields({
                     <div className="inline-flex items-center gap-1 rounded-full border border-border/70 bg-muted/20 px-1 py-0.5">
                       <button
                         type="button"
-                        className="rounded-full px-1.5 text-xs text-muted-foreground hover:bg-muted/60 hover:text-foreground"
+                        className="rounded-full px-1.5 text-sm leading-relaxed text-muted-foreground hover:bg-muted/60 hover:text-foreground"
                         onClick={() => onQuickAccessCountChange(Math.max(1, quickCount - 1))}
                         aria-label={t.decreaseQuickAccessCount}
                       >
                         -
                       </button>
-                      <span className="min-w-[1.25rem] text-center text-xs tabular-nums text-foreground">
+                      <span className="min-w-[1.25rem] text-center text-sm leading-relaxed tabular-nums text-foreground">
                         {quickCount}
                       </span>
                       <button
                         type="button"
-                        className="rounded-full px-1.5 text-xs text-muted-foreground hover:bg-muted/60 hover:text-foreground"
+                        className="rounded-full px-1.5 text-sm leading-relaxed text-muted-foreground hover:bg-muted/60 hover:text-foreground"
                         onClick={() => onQuickAccessCountChange(Math.min(8, quickCount + 1))}
                         aria-label={t.increaseQuickAccessCount}
                       >
@@ -537,7 +537,7 @@ export function ExpenseFormFields({
                       type="button"
                       variant="ghost"
                       size="sm"
-                      className="h-8 shrink-0 px-2 text-xs text-muted-foreground hover:text-foreground"
+                      className="h-8 shrink-0 px-2 text-sm leading-relaxed text-muted-foreground hover:text-foreground"
                       onClick={() => setIsEditingOrder((v) => !v)}
                     >
                       {isEditingOrder ? t.categoryDoneOrderEdit : t.categoryEditOrder}
@@ -574,7 +574,7 @@ export function ExpenseFormFields({
                                 iconKey={c.iconKey}
                                 className="size-5 text-foreground"
                               />
-                              <span className="w-full truncate text-[11px] text-foreground">
+                              <span className="w-full truncate text-sm leading-relaxed text-foreground">
                                 {c.name}
                               </span>
                             </SortableGridCategoryTile>
@@ -604,7 +604,7 @@ export function ExpenseFormFields({
                           aria-pressed={active}
                         >
                           <CategoryGlyph iconKey={c.iconKey} className="size-5 text-foreground" />
-                          <span className="w-full truncate text-[11px] text-foreground">
+                          <span className="w-full truncate text-sm leading-relaxed text-foreground">
                             {c.name}
                           </span>
                         </button>
@@ -621,7 +621,7 @@ export function ExpenseFormFields({
                         "hover:bg-accent/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
                       )}
                     >
-                      <span className="text-sm text-muted-foreground">עוד...</span>
+                      <span className="text-base leading-relaxed text-muted-foreground">עוד...</span>
                     </button>
                   </DialogTrigger>
                   <DialogContent dir={dir}>
@@ -641,7 +641,7 @@ export function ExpenseFormFields({
                           strategy={verticalListSortingStrategy}
                         >
                           <div className="space-y-2 pb-2">
-                            <p className="text-xs text-muted-foreground">{t.quickAccessSectionLabel}</p>
+                            <p className="text-sm leading-relaxed text-muted-foreground">{t.quickAccessSectionLabel}</p>
                             {categoryOptionsResolved.slice(0, quickCount).map((c) => (
                               <SortableDialogCategoryRow
                                 key={`full-${c.id}`}
@@ -651,13 +651,13 @@ export function ExpenseFormFields({
                                 <div className="flex w-full items-center gap-2 text-start">
                                   <CategoryGlyph iconKey={c.iconKey} className="size-4" />
                                   <ColorBadge color={c.color} />
-                                  <span className="truncate text-sm">{c.name}</span>
+                                  <span className="truncate text-base leading-relaxed">{c.name}</span>
                                 </div>
                               </SortableDialogCategoryRow>
                             ))}
                           </div>
                           <div className="max-h-[40vh] space-y-2 overflow-auto pt-2">
-                            <p className="text-xs text-muted-foreground">{t.moreSectionLabel}</p>
+                            <p className="text-sm leading-relaxed text-muted-foreground">{t.moreSectionLabel}</p>
                             {categoryOptionsResolved.slice(quickCount).map((c) => (
                               <SortableDialogCategoryRow
                                 key={`full-more-${c.id}`}
@@ -667,7 +667,7 @@ export function ExpenseFormFields({
                                 <div className="flex w-full items-center gap-2 text-start">
                                   <CategoryGlyph iconKey={c.iconKey} className="size-4" />
                                   <ColorBadge color={c.color} />
-                                  <span className="truncate text-sm">{c.name}</span>
+                                  <span className="truncate text-base leading-relaxed">{c.name}</span>
                                 </div>
                               </SortableDialogCategoryRow>
                             ))}
@@ -692,7 +692,7 @@ export function ExpenseFormFields({
                           >
                             <CategoryGlyph iconKey={c.iconKey} className="size-4" />
                             <ColorBadge color={c.color} />
-                            <span className="truncate text-sm">{c.name}</span>
+                            <span className="truncate text-base leading-relaxed">{c.name}</span>
                           </button>
                         ))}
                       </div>
@@ -719,7 +719,7 @@ export function ExpenseFormFields({
               <SelectTrigger
                 id={`${idPrefix}-category`}
                 className={cn(
-                  "h-auto w-full min-h-[3.5rem] rounded-none border-0 bg-transparent text-sm",
+                  "h-auto w-full min-h-[3.5rem] rounded-none border-0 bg-transparent text-base leading-relaxed",
                   rowPad,
                 )}
               >
@@ -737,7 +737,12 @@ export function ExpenseFormFields({
                       {entryType === "income" ? t.incomeSource : t.category}
                     </span>
                   </div>
-                  <div className="min-w-0 truncate text-foreground">
+                  <div
+                    className={cn(
+                      "min-w-0 truncate",
+                      selectedCategory ? "text-foreground" : "text-muted-foreground",
+                    )}
+                  >
                     {selectedCategory?.name ??
                       (entryType === "income"
                         ? t.incomeSourcePlaceholder
@@ -777,7 +782,7 @@ export function ExpenseFormFields({
           <SelectTrigger
             id={`${idPrefix}-payment`}
             className={cn(
-              "h-auto w-full min-h-[3.5rem] rounded-none border-0 bg-transparent text-sm",
+              "h-auto w-full min-h-[3.5rem] rounded-none border-0 bg-transparent text-base leading-relaxed",
               rowPad,
             )}
           >
@@ -795,7 +800,12 @@ export function ExpenseFormFields({
                   {entryType === "income" ? t.destinationAccount : t.paymentMethod}
                 </span>
               </div>
-              <div className="min-w-0 truncate text-foreground">
+              <div
+                className={cn(
+                  "min-w-0 truncate",
+                  selectedMethod ? "text-foreground" : "text-muted-foreground",
+                )}
+              >
                 {selectedMethod?.name ??
                   (entryType === "income"
                     ? t.destinationAccountPlaceholder
@@ -886,7 +896,7 @@ export function ExpenseFormFields({
                       <div
                         id={`${idPrefix}-installments`}
                         dir="ltr"
-                        className="flex w-[6.5rem] items-center justify-center tabular-nums text-sm"
+                        className="flex w-[6.5rem] items-center justify-center tabular-nums text-base leading-relaxed"
                       >
                         {Math.max(1, Math.floor(installments))}
                       </div>
@@ -920,7 +930,7 @@ export function ExpenseFormFields({
         {onRecurringMonthlyChange ? (
           <>
             <Row>
-              <span className="text-sm text-muted-foreground">
+              <span className="text-base leading-relaxed text-muted-foreground">
                 {entryType === "income" ? t.recurringIncome : t.recurringExpense}
               </span>
               <Switch
@@ -984,7 +994,7 @@ export function ExpenseFormFields({
                         <button
                           key={s}
                           type="button"
-                          className="w-full rounded-xl px-4 py-3 text-start text-sm text-foreground transition-colors hover:bg-accent/50 focus-visible:bg-accent/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                          className="w-full rounded-xl px-4 py-3 text-start text-base leading-relaxed text-foreground transition-colors hover:bg-accent/50 focus-visible:bg-accent/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                           onMouseDown={(e) => {
                             e.preventDefault();
                             onNoteChange(s);
@@ -1038,7 +1048,7 @@ export function ExpenseFormFields({
               />
             </div>
             <Select value={currency} onValueChange={onCurrencySelect}>
-              <SelectTrigger className="w-[min(100%,9.5rem)] shrink-0">
+              <SelectTrigger className="min-h-11 w-[min(100%,9.5rem)] shrink-0">
                 <div className="flex min-w-0 flex-1 items-center gap-2">
                   <CurrencyGlyph iconKey={currencyMeta.iconKey} className="size-3.5" />
                   <SelectValue placeholder={currencyOptionLabel(currencyMeta)} />
@@ -1084,11 +1094,11 @@ export function ExpenseFormFields({
           {entryType === "income" ? t.incomeSource : t.category}
         </Label>
         <Select value={categoryId} onValueChange={onCategoryChange}>
-          <SelectTrigger id={`${idPrefix}-category`} className="w-full">
-            <div className="flex min-w-0 flex-1 items-center gap-2">
+          <SelectTrigger id={`${idPrefix}-category`} className="min-h-11 w-full">
+            <div className="flex min-w-0 flex-1 items-center gap-2.5">
               {selectedCategory ? (
                 <>
-                  <CategoryGlyph iconKey={selectedCategory.iconKey} />
+                  <CategoryGlyph iconKey={selectedCategory.iconKey} className="size-4" />
                   <ColorBadge color={selectedCategory.color} />
                 </>
               ) : null}
@@ -1132,8 +1142,8 @@ export function ExpenseFormFields({
           {entryType === "income" ? t.destinationAccount : t.paymentMethod}
         </Label>
         <Select value={paymentMethodId} onValueChange={onMethodChange}>
-          <SelectTrigger id={`${idPrefix}-payment`} className="w-full">
-            <div className="flex min-w-0 flex-1 items-center gap-2">
+          <SelectTrigger id={`${idPrefix}-payment`} className="min-h-11 w-full">
+            <div className="flex min-w-0 flex-1 items-center gap-2.5">
               {selectedMethod ? (
                 <>
                   <CategoryGlyph iconKey={selectedMethod.iconKey} className="size-4" />
@@ -1253,7 +1263,7 @@ export function ExpenseFormFields({
                   <button
                     key={s}
                     type="button"
-                    className="w-full rounded-xl px-4 py-3 text-start text-sm text-foreground transition-colors hover:bg-accent/50 focus-visible:bg-accent/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    className="w-full rounded-xl px-4 py-3 text-start text-base leading-relaxed text-foreground transition-colors hover:bg-accent/50 focus-visible:bg-accent/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                     onMouseDown={(e) => {
                       // Prevent textarea blur before click applies.
                       e.preventDefault();

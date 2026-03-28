@@ -42,7 +42,7 @@ export default function App() {
         {showRetry ? (
           <button
             type="button"
-            className="rounded-md border border-border px-3 py-1.5 text-xs text-foreground hover:bg-muted/40"
+            className="rounded-md border border-border px-3 py-1.5 text-sm leading-relaxed text-foreground hover:bg-muted/40"
             onClick={() => void retryBootstrap()}
           >
             נסה שוב
@@ -55,7 +55,7 @@ export default function App() {
   return (
     <>
       {profileError ? (
-        <div className="mx-auto mt-2 w-full max-w-lg rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+        <div className="mx-auto mt-2 w-full max-w-lg rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm leading-relaxed text-destructive">
           {profileError}
         </div>
       ) : null}

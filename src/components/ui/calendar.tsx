@@ -28,7 +28,7 @@ function Calendar({ className, classNames, ...props }: CalendarProps) {
           "inline-flex size-8 items-center justify-center rounded-md border border-border bg-background text-muted-foreground hover:bg-accent hover:text-foreground",
         month_grid: "w-full border-collapse",
         weekdays: "flex",
-        weekday: "w-9 text-center text-[0.8rem] font-normal text-muted-foreground",
+        weekday: "w-9 text-center text-sm font-normal leading-relaxed text-muted-foreground",
         week: "mt-2 flex w-full",
         day: "relative h-9 w-9 p-0 text-center text-sm",
         day_button:

@@ -39,6 +39,7 @@ import { useI18n } from "@/context/I18nContext";
 import type { Expense } from "@/data/mock";
 import { overBudgetStripeStyle } from "@/lib/budgetStripe";
 import { convertToILS } from "@/lib/fx";
+import { resolveTransactionCategory } from "@/lib/transactionCategoryDisplay";
 import { formatCurrencyCompact, formatDateDDMMYYYY, formatIls } from "@/lib/format";
 import {
   formatYearMonth,
@@ -61,6 +62,8 @@ type Row = {
   over: boolean;
   pct: number;
 };
+
+const CATEGORY_GRID_INITIAL = 4;
 
 const INCOME_PIE_COLORS = [
   "#22c55e", // emerald
@@ -101,7 +104,7 @@ export function DashboardView({
     formatYearMonth(new Date()),
   );
   const [selectedYear, setSelectedYear] = useState<string>(() => String(new Date().getFullYear()));
-  const [showAllBudgetCategories, setShowAllBudgetCategories] = useState(false);
+  const [showAllCategoryGrids, setShowAllCategoryGrids] = useState(false);
   const [recentVisibleCount, setRecentVisibleCount] = useState(5);
 
   const filteredExpenses = useMemo(() => {
@@ -181,83 +184,68 @@ export function DashboardView({
   const normalizedNet = Math.abs(financeSummary.net) < 0.01 ? 0 : financeSummary.net;
   const netIsZero = Math.abs(normalizedNet) < 0.01;
 
-  const [showAllByCategory, setShowAllByCategory] = useState(false);
-
-  const byCategorySortedBySpend = useMemo(() => {
-    return [...rows].sort((a, b) => b.spent - a.spent);
-  }, [rows]);
-
-  const expenseCategoryPos = useMemo(() => {
-    return new Map(expenseCategories.map((c, i) => [c.id, i] as const));
-  }, [expenseCategories]);
-
-  const byCategoryVisible = useMemo(() => {
-    const sortByCustomOrder = (a: Row, b: Row) => {
-      const ai = expenseCategoryPos.get(a.categoryId);
-      const bi = expenseCategoryPos.get(b.categoryId);
-      const aRank = ai != null ? ai : Number.POSITIVE_INFINITY;
-      const bRank = bi != null ? bi : Number.POSITIVE_INFINITY;
-      return aRank - bRank;
-    };
-
-    if (showAllByCategory) {
-      return [...rows].sort(sortByCustomOrder);
-    }
-
-    return byCategorySortedBySpend
-      .slice(0, 5)
-      .sort(sortByCustomOrder);
-  }, [byCategorySortedBySpend, expenseCategoryPos, rows, showAllByCategory]);
-
-  const incomeBreakdown = useMemo(
+  /** Same order as Entry / Settings: `rows` follows `expenseCategories` from context. */
+  const categoryGridRowsVisible = useMemo(
     () =>
-      incomeSources
-        .map((src, idx) => {
-          const value = incomesOnly
-            .filter((i) => i.categoryId === src.id)
-            .reduce(
-              (s, e) => s + convertToILS(e.amount, e.currency, e.date),
-              0,
-            );
-          return {
-            name: src.name,
-            iconKey: src.iconKey,
-            value,
-            fill: INCOME_PIE_COLORS[idx % INCOME_PIE_COLORS.length],
-          };
-        })
-        .filter((x) => x.value > 0),
-    [incomesOnly, incomeSources, fxTick],
+      showAllCategoryGrids
+        ? rows
+        : rows.slice(0, CATEGORY_GRID_INITIAL),
+    [rows, showAllCategoryGrids],
   );
+
+  const incomeBreakdown = useMemo(() => {
+    const totals = new Map<string, number>();
+    for (const e of incomesOnly) {
+      totals.set(
+        e.categoryId,
+        (totals.get(e.categoryId) ?? 0) +
+          convertToILS(e.amount, e.currency, e.date),
+      );
+    }
+    const seen = new Set<string>();
+    const rows: Array<{
+      categoryId: string;
+      name: string;
+      iconKey: string;
+      value: number;
+      fill: string;
+    }> = [];
+    let colorIdx = 0;
+    for (const src of incomeSources) {
+      const value = totals.get(src.id) ?? 0;
+      if (value <= 0) continue;
+      seen.add(src.id);
+      rows.push({
+        categoryId: src.id,
+        name: src.name,
+        iconKey: src.iconKey,
+        value,
+        fill: INCOME_PIE_COLORS[colorIdx++ % INCOME_PIE_COLORS.length],
+      });
+    }
+    for (const [catId, value] of totals) {
+      if (value <= 0 || seen.has(catId)) continue;
+      const cat = resolveTransactionCategory(
+        catId,
+        "income",
+        expenseCategories,
+        incomeSources,
+      );
+      rows.push({
+        categoryId: catId,
+        name: cat?.name ?? catId,
+        iconKey: cat?.iconKey ?? "tag",
+        value,
+        fill: INCOME_PIE_COLORS[colorIdx++ % INCOME_PIE_COLORS.length],
+      });
+    }
+    return rows;
+  }, [incomesOnly, incomeSources, expenseCategories, fxTick]);
 
   const maxSpend = useMemo(
     () => rows.reduce((m, r) => Math.max(m, r.spent), 0),
     [rows],
   );
-
-  const budgetRowsSorted = useMemo(
-    () => [...rows].sort((a, b) => b.spent - a.spent),
-    [rows],
-  );
-  const budgetRowsVisible = useMemo(() => {
-    const sortByCustomOrder = (a: Row, b: Row) => {
-      const ai = expenseCategoryPos.get(a.categoryId);
-      const bi = expenseCategoryPos.get(b.categoryId);
-      const aRank = ai != null ? ai : Number.POSITIVE_INFINITY;
-      const bRank = bi != null ? bi : Number.POSITIVE_INFINITY;
-      return aRank - bRank;
-    };
-
-    if (showAllBudgetCategories) {
-      return [...rows].sort(sortByCustomOrder);
-    }
-
-    if (budgetRowsSorted.length <= 6) {
-      return [...budgetRowsSorted].sort(sortByCustomOrder);
-    }
-
-    return budgetRowsSorted.slice(0, 6).sort(sortByCustomOrder);
-  }, [budgetRowsSorted, expenseCategoryPos, rows, showAllBudgetCategories]);
 
   const recentSorted = useMemo(() => {
     return [...filteredExpenses].sort((a, b) => {
@@ -305,7 +293,7 @@ export function DashboardView({
                 value={timeframeMode}
                 onValueChange={(v) => setTimeframeMode(v as "month" | "year" | "all")}
               >
-                <SelectTrigger className="w-[10rem]">
+                <SelectTrigger className="min-h-11 w-[10rem]">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent position="popper">
@@ -332,7 +320,7 @@ export function DashboardView({
               ) : null}
               {timeframeMode === "year" ? (
                 <Select value={selectedYear} onValueChange={setSelectedYear}>
-                  <SelectTrigger className="w-[8rem]">
+                  <SelectTrigger className="min-h-11 w-[8rem]">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent position="popper">
@@ -350,7 +338,7 @@ export function DashboardView({
           </div>
 
           <div>
-            <p className="text-sm text-muted-foreground">
+            <p className="text-base leading-relaxed text-muted-foreground">
               {selectedMonth === ALL_TIME
                 ? t.exportAllTime
                 : `${t.thisMonthTotal} · ${hebrewMonthYearLabel(selectedMonth)}`}
@@ -374,7 +362,7 @@ export function DashboardView({
           </div>
 
           <div className="space-y-2" role="group" aria-label={t.chartToggleHint}>
-            <p className="text-xs font-medium text-muted-foreground">
+            <p className="text-sm font-medium leading-relaxed text-muted-foreground">
               {t.chartToggleHint}
             </p>
             <div className="flex rounded-lg border border-border bg-muted/40 p-1">
@@ -406,7 +394,7 @@ export function DashboardView({
           {chartMode === "pie" ? (
             <div className="w-full space-y-4" aria-label={t.chartPie}>
               {pieData.length === 0 ? (
-                <p className="py-8 text-center text-sm text-muted-foreground">
+                <p className="py-8 text-center text-base leading-relaxed text-muted-foreground">
                   {t.pieEmpty}
                 </p>
               ) : (
@@ -465,7 +453,7 @@ export function DashboardView({
                           style={{ backgroundColor: d.fill }}
                           aria-hidden
                         />
-                        <span className="min-w-0 truncate text-sm font-medium leading-tight">
+                        <span className="min-w-0 truncate text-base font-medium leading-relaxed">
                           {d.name}
                         </span>
                       </li>
@@ -476,54 +464,66 @@ export function DashboardView({
             </div>
           ) : (
             <div className="space-y-2">
-              <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+              <p className="text-sm font-medium uppercase tracking-wider leading-relaxed text-muted-foreground">
                 {t.byCategory}
               </p>
               <ul className="grid grid-cols-2 gap-3">
-                {byCategoryVisible.map((r) => (
+                {categoryGridRowsVisible.map((r) => (
                   <li key={r.categoryId}>
                     <div
                       className={cn(
-                        "rounded-lg border border-border/50 bg-card/60 px-2.5 py-2",
+                        "rounded-lg border border-border/50 bg-card/60 px-3 py-2.5",
                         r.over && "border-red-500/50",
                       )}
+                      dir={dir}
                     >
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="flex min-w-0 items-center gap-2 text-xs font-medium">
-                          <CategoryGlyph
-                            iconKey={r.iconKey}
-                            className="size-3.5 shrink-0 opacity-80"
-                          />
-                          <span className="truncate">{r.name}</span>
-                          {r.over ? <AlertCircle className="size-3 text-red-500/70" /> : null}
-                        </span>
-                        <span className="shrink-0 tabular-nums text-[11px] text-muted-foreground">
-                          {formatIls(r.spent)}
-                        </span>
-                      </div>
-                      <div className="mt-1 h-0.5 overflow-hidden rounded-full bg-secondary/90">
+                      <div className="mx-auto flex w-full max-w-[18rem] flex-col items-center gap-2">
+                        <div className="flex w-full flex-col items-center gap-1">
+                          <div className="flex items-center justify-center gap-2 text-center">
+                            <CategoryGlyph
+                              iconKey={r.iconKey}
+                              className="size-3.5 shrink-0 opacity-80"
+                            />
+                            <span className="max-w-[14rem] truncate text-base font-medium leading-relaxed">
+                              {r.name}
+                            </span>
+                            {r.over ? (
+                              <AlertCircle className="size-3.5 shrink-0 text-red-500/70" />
+                            ) : null}
+                          </div>
+                          <span className="text-center text-base tabular-nums leading-relaxed text-muted-foreground">
+                            {formatIls(r.spent)}
+                          </span>
+                        </div>
+                        {/* Fixed slot: aligns row height with Monthly Budget cards */}
                         <div
-                          className="h-full rounded-full transition-all"
-                          style={{
-                            width: `${r.budget > 0 ? (maxSpend ? (r.spent / maxSpend) * 100 : 0) : 0}%`,
-                            backgroundColor: r.budget > 0 ? r.color : "#9ca3af",
-                          }}
+                          className="flex h-5 w-full shrink-0 items-center justify-center gap-1 px-1"
+                          aria-hidden
                         />
+                        <div className="h-1 w-full overflow-hidden rounded-full bg-secondary/90">
+                          <div
+                            className="h-full rounded-full transition-all"
+                            style={{
+                              width: `${r.budget > 0 ? (maxSpend ? (r.spent / maxSpend) * 100 : 0) : 0}%`,
+                              backgroundColor: r.budget > 0 ? r.color : "#9ca3af",
+                            }}
+                          />
+                        </div>
                       </div>
                     </div>
                   </li>
                 ))}
               </ul>
 
-              {byCategorySortedBySpend.length > 5 ? (
+              {rows.length > CATEGORY_GRID_INITIAL ? (
                 <Button
                   type="button"
                   variant="ghost"
                   size="sm"
-                  className="w-full text-xs text-muted-foreground"
-                  onClick={() => setShowAllByCategory((v) => !v)}
+                  className="w-full text-sm leading-relaxed text-muted-foreground"
+                  onClick={() => setShowAllCategoryGrids((v) => !v)}
                 >
-                  {showAllByCategory
+                  {showAllCategoryGrids
                     ? t.dashboardRecentShowLess
                     : t.dashboardRecentShowMore}
                 </Button>
@@ -532,11 +532,11 @@ export function DashboardView({
           )}
 
           <div className="space-y-2">
-            <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+            <p className="text-sm font-medium uppercase tracking-wider leading-relaxed text-muted-foreground">
               {t.budgetSection}
             </p>
             <ul className="grid grid-cols-2 gap-3" aria-live="polite">
-              {budgetRowsVisible.map((r) => {
+              {categoryGridRowsVisible.map((r) => {
                 const fillWidth =
                   r.budget > 0 ? Math.min(100, (r.spent / r.budget) * 100) : 0;
                 const overfill = r.over ? 100 : fillWidth;
@@ -546,10 +546,11 @@ export function DashboardView({
                     <button
                       type="button"
                       className={cn(
-                        "w-full rounded-lg border border-border/50 bg-card/60 px-2.5 py-2 text-start transition-colors",
+                        "w-full rounded-lg border border-border/50 bg-card/60 px-3 py-2.5 transition-colors",
                         "hover:bg-accent/25 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
                         r.over && "border-red-500/50",
                       )}
+                      dir={dir}
                       onClick={() =>
                         onCategoryDrillDown(
                           r.categoryId,
@@ -559,72 +560,80 @@ export function DashboardView({
                         )
                       }
                     >
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="flex min-w-0 items-center gap-1.5 text-xs font-medium">
-                          <CategoryGlyph
-                            iconKey={r.iconKey}
-                            className="size-3.5 shrink-0 opacity-80"
-                          />
-                          <span className="truncate">{r.name}</span>
-                        </span>
-                        <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">
-                          {r.budget > 0 ? (
+                      <div className="mx-auto flex w-full max-w-[18rem] flex-col items-center gap-2">
+                        <div className="flex w-full flex-col items-center gap-1">
+                          <div className="flex items-center justify-center gap-2 text-center">
+                            <CategoryGlyph
+                              iconKey={r.iconKey}
+                              className="size-3.5 shrink-0 opacity-80"
+                            />
+                            <span className="max-w-[14rem] truncate text-base font-medium leading-relaxed">
+                              {r.name}
+                            </span>
+                          </div>
+                          <p className="text-center text-base tabular-nums leading-relaxed text-muted-foreground">
+                            {r.budget > 0 ? (
+                              <>
+                                {t.remaining} {formatIls(remaining)}
+                              </>
+                            ) : (
+                              t.noBudgetSet
+                            )}
+                          </p>
+                        </div>
+                        <div className="flex h-5 w-full shrink-0 items-center justify-center gap-1 px-1 text-base font-medium leading-snug text-destructive">
+                          {r.over ? (
                             <>
-                              {t.remaining} {formatIls(remaining)}
+                              <AlertCircle className="size-3.5 shrink-0" aria-hidden />
+                              <span className="line-clamp-1">{t.overBudget}</span>
                             </>
-                          ) : "לא מוגדר תקציב"}
-                        </span>
-                      </div>
-                      {r.over ? (
-                        <p className="mt-0.5 flex items-center gap-0.5 text-[10px] font-medium text-destructive">
-                          <AlertCircle className="size-3" aria-hidden />
-                          {t.overBudget}
-                        </p>
-                      ) : null}
-                      <div
-                        className={cn(
-                          "mt-1.5 h-0.5 overflow-hidden rounded-full bg-secondary/90",
-                          r.over && "ring-1 ring-red-500/25",
-                        )}
-                        role="presentation"
-                      >
+                          ) : null}
+                        </div>
                         <div
-                          className="h-full rounded-full transition-all"
-                          style={{
-                            width: `${r.budget > 0 ? overfill : 0}%`,
-                            ...(r.over
-                              ? overBudgetStripeStyle(r.color)
-                              : { backgroundColor: r.budget > 0 ? r.color : "#9ca3af" }),
-                          }}
-                        />
+                          className={cn(
+                            "h-1 w-full overflow-hidden rounded-full bg-secondary/90",
+                            r.over && "ring-1 ring-red-500/25",
+                          )}
+                          role="presentation"
+                        >
+                          <div
+                            className="h-full rounded-full transition-all"
+                            style={{
+                              width: `${r.budget > 0 ? overfill : 0}%`,
+                              ...(r.over
+                                ? overBudgetStripeStyle(r.color)
+                                : { backgroundColor: r.budget > 0 ? r.color : "#9ca3af" }),
+                            }}
+                          />
+                        </div>
                       </div>
                     </button>
                   </li>
                 );
               })}
             </ul>
-            {budgetRowsSorted.length > 6 ? (
+            {rows.length > CATEGORY_GRID_INITIAL ? (
               <Button
                 type="button"
                 variant="ghost"
                 size="sm"
-                className="w-full text-xs text-muted-foreground"
-                onClick={() => setShowAllBudgetCategories((v) => !v)}
+                className="w-full text-sm leading-relaxed text-muted-foreground"
+                onClick={() => setShowAllCategoryGrids((v) => !v)}
               >
-                {showAllBudgetCategories
-                  ? t.dashboardShowLessCategories
-                  : t.dashboardShowAllCategories}
+                {showAllCategoryGrids
+                  ? t.dashboardRecentShowLess
+                  : t.dashboardRecentShowMore}
               </Button>
             ) : null}
           </div>
 
           <div className="space-y-2">
-            <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+            <p className="text-sm font-medium uppercase tracking-wider leading-relaxed text-muted-foreground">
               {t.incomeBreakdown}
             </p>
             <div className="w-full rounded-xl border border-border/60 bg-muted/30 p-2" dir="ltr">
               {incomeBreakdown.length === 0 ? (
-                <p className="py-8 text-center text-sm text-muted-foreground" dir={dir}>
+                <p className="py-8 text-center text-base leading-relaxed text-muted-foreground" dir={dir}>
                   {t.pieEmpty}
                 </p>
               ) : (
@@ -645,7 +654,7 @@ export function DashboardView({
                           >
                             {incomeBreakdown.map((entry) => (
                               <Cell
-                                key={entry.name}
+                                key={entry.categoryId}
                                 fill={entry.fill}
                                 stroke="transparent"
                               />
@@ -683,7 +692,7 @@ export function DashboardView({
                           style={{ backgroundColor: d.fill }}
                           aria-hidden
                         />
-                        <span className="min-w-0 truncate text-sm font-medium leading-tight">
+                        <span className="min-w-0 truncate text-base font-medium leading-relaxed">
                           {d.name}
                         </span>
                       </li>
@@ -695,23 +704,26 @@ export function DashboardView({
           </div>
 
           <div className="space-y-3">
-            <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+            <p className="text-sm font-medium uppercase tracking-wider leading-relaxed text-muted-foreground">
               {t.recentExpenses}
             </p>
             {recentSorted.length === 0 ? (
-              <p className="text-sm text-muted-foreground">
+              <p className="text-base leading-relaxed text-muted-foreground">
                 {t.recentEmpty}
               </p>
             ) : (
               <ul className="space-y-2">
                 {recentDisplayed.map((e) => {
-                  const cats =
-                    e.type === "income" ? incomeSources : expenseCategories;
                   const methods =
                     e.type === "income"
                       ? destinationAccounts
                       : paymentMethods;
-                  const cat = cats.find((c) => c.id === e.categoryId);
+                  const cat = resolveTransactionCategory(
+                    e.categoryId,
+                    e.type,
+                    expenseCategories,
+                    incomeSources,
+                  );
                   const pm = methods.find(
                     (p) => p.id === e.paymentMethodId,
                   );
@@ -727,29 +739,29 @@ export function DashboardView({
                         )}
                       >
                         <div className="flex flex-wrap items-baseline justify-between gap-2">
-                          <span className="text-sm font-semibold tabular-nums">
+                          <span className="text-base font-semibold tabular-nums leading-relaxed">
                             {formatIls(convertToILS(e.amount, e.currency, e.date))}
                           </span>
-                          <span className="text-xs text-muted-foreground">
+                          <span className="text-sm leading-relaxed text-muted-foreground">
                             {dateLabel}
                           </span>
                         </div>
                         {e.installments > 1 ? (
-                          <p className="text-[11px] text-muted-foreground">
+                          <p className="text-sm leading-relaxed text-muted-foreground">
                             {t.installmentLabel} {e.installmentIndex} {t.ofLabel} {e.installments}
                           </p>
                         ) : null}
-                        <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                        <div className="flex flex-wrap items-center gap-2 text-base leading-relaxed text-muted-foreground">
                           {e.currency !== "ILS" ? (
                             <span className="rounded-md border border-border/70 bg-background px-1.5 py-0.5">
                               {formatCurrencyCompact(e.amount, e.currency, currencies)}
                             </span>
                           ) : null}
                           {cat ? (
-                            <span className="flex items-center gap-1.5">
+                            <span className="flex items-center gap-1.5 font-medium text-foreground">
                               <CategoryGlyph iconKey={cat.iconKey} className="size-3.5" />
                               <ColorBadge color={cat.color} />
-                              <span>{cat.name}</span>
+                              <span className="leading-relaxed">{cat.name}</span>
                             </span>
                           ) : null}
                           {pm ? (
@@ -759,7 +771,7 @@ export function DashboardView({
                           ) : null}
                         </div>
                         {e.note ? (
-                          <p className="line-clamp-2 text-xs text-muted-foreground">
+                          <p className="line-clamp-2 text-sm leading-relaxed text-muted-foreground">
                             {e.note}
                           </p>
                         ) : null}
@@ -776,7 +788,7 @@ export function DashboardView({
                     type="button"
                     variant="ghost"
                     size="sm"
-                    className="w-full text-xs text-muted-foreground"
+                    className="w-full text-sm leading-relaxed text-muted-foreground"
                     onClick={() =>
                       setRecentVisibleCount((c) =>
                         Math.min(c + 10, recentSorted.length),
@@ -791,7 +803,7 @@ export function DashboardView({
                     type="button"
                     variant="ghost"
                     size="sm"
-                    className="w-full text-xs text-muted-foreground"
+                    className="w-full text-sm leading-relaxed text-muted-foreground"
                     onClick={() => setRecentVisibleCount(5)}
                   >
                     {t.dashboardRecentShowLess}
@@ -803,10 +815,10 @@ export function DashboardView({
 
           <div className="space-y-2">
             <div>
-              <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+              <p className="text-sm font-medium uppercase tracking-wider leading-relaxed text-muted-foreground">
                 {t.trendsTitle}
               </p>
-              <p className="text-xs text-muted-foreground">
+              <p className="text-sm leading-relaxed text-muted-foreground">
                 {t.trendsSubtitle}
               </p>
             </div>
@@ -838,8 +850,8 @@ export function DashboardView({
                           payload.find((p) => p.dataKey === "expense")?.value ?? 0,
                         );
                         return (
-                          <div className="flex flex-col gap-2 rounded-md border border-border bg-popover px-3 py-2 text-sm shadow-md" dir={dir}>
-                            {ym ? <p className="text-xs text-muted-foreground">{hebrewMonthYearLabel(ym)}</p> : null}
+                          <div className="flex flex-col gap-2 rounded-md border border-border bg-popover px-3 py-2 text-base leading-relaxed shadow-md" dir={dir}>
+                            {ym ? <p className="text-sm leading-relaxed text-muted-foreground">{hebrewMonthYearLabel(ym)}</p> : null}
                             <div className="inline-flex items-center gap-1 rounded-md border border-green-500/40 bg-green-500/10 px-2 py-1 tabular-nums">
                               <span className="size-2 rounded-full bg-green-500" /> הכנסות: {formatIls(income)}
                             </div>
@@ -869,7 +881,7 @@ export function DashboardView({
             </div>
           </div>
 
-          <div className="rounded-lg border border-dashed border-border bg-muted/30 p-4 text-center text-sm text-muted-foreground">
+          <div className="rounded-lg border border-dashed border-border bg-muted/30 p-4 text-center text-base leading-relaxed text-muted-foreground">
             {t.dashboardFooterNote}
           </div>
         </CardContent>
@@ -898,12 +910,12 @@ function SpendTooltip({
   const pct = totalSpend > 0 ? Math.round((value / totalSpend) * 100) : 0;
   return (
     <div
-      className="rounded-md border border-border bg-popover px-3 py-2 text-sm text-popover-foreground shadow-md"
+      className="rounded-md border border-border bg-popover px-3 py-2 text-base leading-relaxed text-popover-foreground shadow-md"
       dir={dir}
     >
       <p className="font-semibold">{name}</p>
       <p className="tabular-nums">{formatIls(value)}</p>
-      <p className="text-xs text-muted-foreground">
+      <p className="text-sm leading-relaxed text-muted-foreground">
         {pct}% {pieTooltipLabel}
       </p>
     </div>
@@ -926,11 +938,11 @@ function FinanceStat({
   prefix?: string;
 }) {
   return (
-    <div className="rounded-lg border border-border/70 bg-muted/20 p-2">
-      <p className="text-[11px] text-muted-foreground">{label}</p>
+    <div className="rounded-lg border border-border/70 bg-muted/20 p-2.5">
+      <p className="text-sm leading-relaxed text-muted-foreground">{label}</p>
       <p
         className={cn(
-          "text-sm font-semibold tabular-nums",
+          "text-base font-semibold tabular-nums leading-relaxed",
           isZero
             ? "text-foreground"
             : positive

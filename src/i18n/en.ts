@@ -139,6 +139,28 @@ export const en = {
   settingsBudgetLabel: "Monthly cap (₪)",
   settingsSaveNote: "Changes are saved automatically.",
 
+  installAppSectionTitle: "Install on your device",
+  installAppSectionDesc:
+    "Add Expandy to your home screen to open it like an app — without the browser URL bar.",
+  installAppGuidelinesButton: "Guidelines",
+  installAppDialogTitle: "Installation instructions",
+  installAppButton: "Install app",
+  installAppAndroidChromeNote:
+    "One-tap install works in Chrome on Android (and other supported browsers). On iPhone, follow the Safari steps in Guidelines.",
+  installAppInstructionsLead: "Instructions by browser:",
+  installAppChromeSectionTitle: "Chrome / Android",
+  installAppChromeBullet1:
+    "On this screen, tap “Install app” (below the Guidelines button).",
+  installAppChromeBullet2:
+    "If nothing appears, open the browser menu (⋮) and choose “Install app”.",
+  installAppSafariSectionTitle: "Safari / iPhone (iOS)",
+  installAppSafariBullet1:
+    "Tap the Share icon (square with an arrow) in the toolbar.",
+  installAppSafariBullet2: "Scroll down and choose “Add to Home Screen”.",
+  installAppAlreadyInstalled: "You’re already using the app in full-screen mode.",
+  installAppDesktopHint:
+    "On desktop: use your browser menu (Chrome / Edge) to install the app or create a shortcut.",
+
   settingsDangerZone: "Reset data",
   settingsDangerZoneDesc:
     "Deletes all transactions, custom lists, assets and budgets on this device. This cannot be undone.",

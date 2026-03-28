@@ -22,6 +22,7 @@ import { useI18n } from "@/context/I18nContext";
 import type { Expense } from "@/data/mock";
 import { convertToILS } from "@/lib/fx";
 import { formatCurrencyCompact, formatDateDDMMYYYY, formatIls } from "@/lib/format";
+import { resolveTransactionCategory } from "@/lib/transactionCategoryDisplay";
 import {
   formatYearMonth,
   type YearMonth,
@@ -169,8 +170,13 @@ export function HistoryView({
       )
       .filter((e) => {
         if (!q) return true;
-        const cats = e.type === "income" ? incomeSources : expenseCategories;
-        const catName = (cats.find((c) => c.id === e.categoryId)?.name ?? "").toLowerCase();
+        const cat = resolveTransactionCategory(
+          e.categoryId,
+          e.type,
+          expenseCategories,
+          incomeSources,
+        );
+        const catName = (cat?.name ?? "").toLowerCase();
         const note = typeof e.note === "string" ? e.note : "";
         return note.toLowerCase().includes(q) || catName.includes(q);
       });
@@ -243,7 +249,7 @@ export function HistoryView({
               value={categoryFilter}
               onValueChange={setCategoryFilter}
             >
-              <SelectTrigger id="hist-cat" className="h-10 w-full">
+              <SelectTrigger id="hist-cat" className="min-h-11 w-full">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent position="popper">
@@ -299,7 +305,7 @@ export function HistoryView({
           <div className="space-y-1.5">
             <Label htmlFor="hist-sort">מיון</Label>
             <Select value={sortBy} onValueChange={(v) => setSortBy(v as typeof sortBy)}>
-              <SelectTrigger id="hist-sort" className="h-10 w-full">
+              <SelectTrigger id="hist-sort" className="min-h-11 w-full">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent position="popper">
@@ -328,8 +334,12 @@ export function HistoryView({
           </p>
         ) : (
           pagedFiltered.map((e) => {
-            const cats = e.type === "income" ? incomeSources : expenseCategories;
-            const cat = cats.find((c) => c.id === e.categoryId);
+            const cat = resolveTransactionCategory(
+              e.categoryId,
+              e.type,
+              expenseCategories,
+              incomeSources,
+            );
             const dateLabel = formatDateDDMMYYYY(e.date);
             const verified = e.isVerified === true;
             const installmentText =
@@ -375,25 +385,25 @@ export function HistoryView({
                       )}
 
                       <div className="flex min-w-0 flex-col items-start text-right">
-                        <span className="truncate font-bold">
+                        <span className="truncate text-base font-semibold leading-relaxed">
                           {cat?.name ?? "—"}
                         </span>
                         <span className="truncate text-sm text-muted-foreground">
                           {typeof e.note === "string" && e.note.trim() ? e.note : "—"}
                         </span>
                         {installmentText ? (
-                          <span className="truncate text-xs text-muted-foreground">
+                          <span className="truncate text-sm leading-relaxed text-muted-foreground">
                             {installmentText}
                           </span>
                         ) : null}
                         <span
-                          className="mt-1 text-xs tabular-nums text-gray-400"
+                          className="mt-1 text-sm leading-relaxed tabular-nums text-gray-400"
                           dir="ltr"
                         >
                           {dateLabel}
                         </span>
                         {e.recurringMonthly || (e.type === "expense" && e.installments > 1) ? (
-                          <span className="mt-1 inline-flex items-center gap-1 text-[11px] text-muted-foreground">
+                          <span className="mt-1 inline-flex items-center gap-1 text-sm leading-relaxed text-muted-foreground">
                             <RefreshCw className="size-3" />
                             <span>Recurring</span>
                           </span>
@@ -412,7 +422,7 @@ export function HistoryView({
                         {formatIls(convertToILS(e.amount, e.currency, e.date))}
                       </span>
                       {e.currency !== "ILS" ? (
-                        <span className="text-xs tabular-nums text-muted-foreground">
+                        <span className="text-sm leading-relaxed tabular-nums text-muted-foreground">
                           {formatCurrencyCompact(e.amount, e.currency, currencies)}
                         </span>
                       ) : null}
@@ -448,7 +458,7 @@ export function HistoryView({
           dir="ltr"
         >
           <div className="flex items-center gap-2">
-            <Label htmlFor="hist-rows" className="whitespace-nowrap text-xs text-muted-foreground">
+            <Label htmlFor="hist-rows" className="whitespace-nowrap text-sm leading-relaxed text-muted-foreground">
               {t.historyRowsPerPage}
             </Label>
             <Select
@@ -458,7 +468,7 @@ export function HistoryView({
                 else setRowsPerPage(Number(v) as 10 | 20 | 50);
               }}
             >
-              <SelectTrigger id="hist-rows" className="h-9 w-[5.5rem]">
+              <SelectTrigger id="hist-rows" className="min-h-10 w-[5.5rem]">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent position="popper">
@@ -490,7 +500,7 @@ export function HistoryView({
               >
                 <ChevronLeft className="size-4" />
               </Button>
-              <span className="min-w-[5rem] text-center text-xs tabular-nums text-muted-foreground">
+              <span className="min-w-[5rem] text-center text-sm leading-relaxed tabular-nums text-muted-foreground">
                 {t.historyPageOf} {page + 1} / {totalPages}
               </span>
               <Button
@@ -508,7 +518,7 @@ export function HistoryView({
               </Button>
             </div>
           ) : (
-            <span className="text-xs tabular-nums text-muted-foreground">
+            <span className="text-sm leading-relaxed tabular-nums text-muted-foreground">
               {filtered.length}
             </span>
           )}

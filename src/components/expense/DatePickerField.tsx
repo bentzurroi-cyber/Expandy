@@ -45,8 +45,8 @@ export function DatePickerField({
             variant="outline"
             className={cn(
               variant === "row"
-                ? "h-auto min-h-[3.5rem] w-full items-center justify-between rounded-none border-0 bg-transparent px-5 py-5 text-sm font-normal"
-                : "h-10 w-full justify-start ps-3 text-start font-normal",
+                ? "h-auto min-h-[3.5rem] w-full items-center justify-between rounded-none border-0 bg-transparent px-5 py-5 text-base font-normal leading-relaxed"
+                : "h-10 w-full justify-start ps-3 text-start text-base font-normal leading-relaxed",
               !date && "text-muted-foreground",
             )}
           >

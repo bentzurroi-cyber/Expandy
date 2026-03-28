@@ -45,6 +45,11 @@ import {
   removeExpandyAppDataKeys,
 } from "@/lib/expandy-storage";
 import { isValidHouseholdCode, normalizeHouseholdCode } from "@/lib/household";
+import {
+  isStandardUuid,
+  parseLegacyInstallmentCompositeId,
+  parseProjectedRecurringId,
+} from "@/lib/expenseIds";
 
 const STORAGE_KEY = "expandy-expenses-v1";
 const STORAGE_INCOME_SOURCES = "expandy-income-sources-v1";
@@ -312,6 +317,36 @@ function projectedRecurringId(templateId: string, ym: string): string {
   return `rec|${templateId}|${ym}`;
 }
 
+function buildSupabaseExpenseUpdateBody(
+  patch: Partial<Omit<Expense, "id">>,
+): Record<string, unknown> {
+  const body: Record<string, unknown> = {};
+  if (patch.amount !== undefined) body.amount = patch.amount;
+  if (patch.categoryId !== undefined) body.category = patch.categoryId;
+  if (patch.date !== undefined) body.date = patch.date;
+  if (patch.note !== undefined) body.note = patch.note;
+  if (patch.currency !== undefined) body.currency = patch.currency;
+  if (patch.isVerified !== undefined) body.is_verified = patch.isVerified === true;
+  if (patch.recurringMonthly !== undefined) {
+    body.is_recurring = patch.recurringMonthly === true;
+  }
+  if (patch.type !== undefined) body.entry_type = patch.type;
+  if (patch.paymentMethodId !== undefined) {
+    body.payment_method_id = patch.paymentMethodId;
+  }
+  const ii: Record<string, unknown> = {};
+  if (patch.installmentIndex !== undefined) {
+    ii.installmentIndex = patch.installmentIndex;
+  }
+  if (patch.installments !== undefined) ii.installments = patch.installments;
+  if (patch.paymentMethodId !== undefined) {
+    ii.paymentMethodId = patch.paymentMethodId;
+  }
+  if (patch.type !== undefined) ii.type = patch.type;
+  if (Object.keys(ii).length > 0) body.installments_info = ii;
+  return body;
+}
+
 type SupabaseExpenseRow = {
   id: string;
   user_id: string;
@@ -322,6 +357,9 @@ type SupabaseExpenseRow = {
   note: string;
   currency: string;
   is_verified: boolean;
+  /** Canonical type on row; preferred over JSON when present. */
+  entry_type?: string | null;
+  payment_method_id?: string | null;
   installments_info: {
     installmentIndex?: number;
     installments?: number;
@@ -348,15 +386,25 @@ type HouseholdAppState = {
 };
 
 function mapDbExpenseToApp(row: SupabaseExpenseRow): Expense {
+  const colType = row.entry_type === "income" ? "income" : row.entry_type === "expense" ? "expense" : undefined;
+  const jsonType = row.installments_info?.type;
+  const type: Expense["type"] =
+    colType === "income" || (colType === undefined && jsonType === "income")
+      ? "income"
+      : "expense";
+  const paymentMethodId =
+    typeof row.payment_method_id === "string" && row.payment_method_id.length > 0
+      ? row.payment_method_id
+      : row.installments_info?.paymentMethodId ?? "";
   return {
     id: row.id,
     date: row.date,
     amount: Number(row.amount) || 0,
     currency: row.currency,
     categoryId: row.category,
-    paymentMethodId: row.installments_info?.paymentMethodId ?? "",
+    paymentMethodId,
     note: row.note ?? "",
-    type: row.installments_info?.type === "income" ? "income" : "expense",
+    type,
     installments: Math.max(1, Math.floor(row.installments_info?.installments ?? 1)),
     installmentIndex: Math.max(1, Math.floor(row.installments_info?.installmentIndex ?? 1)),
     recurringMonthly: row.is_recurring === true,
@@ -446,7 +494,12 @@ function newId(): string {
   try {
     return crypto.randomUUID();
   } catch {
-    return `exp-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+    const a = new Uint8Array(16);
+    crypto.getRandomValues(a);
+    a[6] = (a[6] & 0x0f) | 0x40;
+    a[8] = (a[8] & 0x3f) | 0x80;
+    const h = [...a].map((b) => b.toString(16).padStart(2, "0")).join("");
+    return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
   }
 }
 
@@ -570,7 +623,7 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
       const { data, error } = await supabase
         .from("expenses")
         .select(
-          "id, user_id, household_id, amount, category, date, note, currency, is_verified, installments_info, is_recurring",
+          "id, user_id, household_id, amount, category, date, note, currency, is_verified, installments_info, is_recurring, entry_type, payment_method_id",
         )
         .eq("household_id", profile.household_id)
         .order("date", { ascending: false });
@@ -606,7 +659,11 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
         .eq("household_id", profile.household_id);
 
       if (existingExpenses === 0) {
-        const localExpenses = readStoredExpenses();
+        const localExpenses = readStoredExpenses().filter((row) => {
+          if (isStandardUuid(row.id)) return true;
+          console.warn("[Expenses] Skipping local migration row with non-UUID id", row.id);
+          return false;
+        });
         if (localExpenses.length) {
           await supabase.from("expenses").upsert(
             localExpenses.map((row) => ({
@@ -625,6 +682,8 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
                 paymentMethodId: row.paymentMethodId,
                 type: row.type,
               },
+              entry_type: row.type,
+              payment_method_id: row.paymentMethodId,
               is_recurring: row.recurringMonthly === true,
             })),
           );
@@ -852,13 +911,12 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
     let rows: Expense[] = [];
     if (input.type === "expense" && input.recurringMonthly) {
       const count = Math.max(1, Math.floor(input.installments > 1 ? input.installments : 12));
-      const originalId = newId();
       for (let i = 0; i < count; i++) {
         const installNote = `(תשלום ${i + 1} מתוך ${count})`;
         const baseNote = input.note.trim();
         rows.push({
           ...input,
-          id: `${originalId}-installment-${i + 1}`,
+          id: newId(),
           date: addMonthsToIsoDate(input.date, i),
           amount: Math.round(input.amount * 100) / 100,
           note: baseNote ? `${baseNote} ${installNote}` : installNote,
@@ -870,13 +928,12 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
     } else if (input.type === "expense" && input.installments > 1) {
       const count = Math.max(1, Math.floor(input.installments));
       const unit = Math.round((input.amount / count) * 100) / 100;
-      const originalId = newId();
       for (let i = 0; i < count; i++) {
         const baseNote = input.note.trim();
         const installNote = `(תשלום ${i + 1} מתוך ${count})`;
         rows.push({
           ...input,
-          id: `${originalId}-installment-${i + 1}`,
+          id: newId(),
           amount: unit,
           date: addMonthsToIsoDate(input.date, i),
           note: baseNote ? `${baseNote} ${installNote}` : installNote,
@@ -886,6 +943,16 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
       }
     } else {
       rows = [{ ...input, id: newId() }];
+    }
+
+    for (const row of rows) {
+      if (!isStandardUuid(row.id)) {
+        console.error("[Expenses] Refusing cloud write: expense id is not a UUID", row.id);
+        return {
+          ok: false as const,
+          error: "שמירה נכשלה: מזהה תנועה לא תקין. נסה שוב.",
+        };
+      }
     }
 
     const payload = rows.map((row) => ({
@@ -898,6 +965,8 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
       note: row.note,
       currency: row.currency,
       is_verified: row.isVerified === true,
+      entry_type: row.type,
+      payment_method_id: row.paymentMethodId,
       installments_info: {
         installmentIndex: row.installmentIndex,
         installments: row.installments,
@@ -928,11 +997,8 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
           if (!isYearMonth(baseYm)) continue;
           if (baseYm > ym) continue;
 
-          // income skips supported
-          if (t.type === "income") {
-            const skips = new Set(recurringIncomeSkips[t.id] ?? []);
-            if (skips.has(ym)) continue;
-          }
+          const skips = new Set(recurringIncomeSkips[t.id] ?? []);
+          if (skips.has(ym)) continue;
 
           const id = projectedRecurringId(t.id, ym);
           if (existingIds.has(id)) continue;
@@ -1304,30 +1370,62 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
 
   const updateExpense = useCallback(
     (id: string, patch: Partial<Omit<Expense, "id">>) => {
+      const projected = parseProjectedRecurringId(id);
+      if (projected) {
+        const templatePatch: Partial<Omit<Expense, "id">> = { ...patch };
+        delete templatePatch.date;
+        setExpenses((prev) =>
+          prev.map((e) => {
+            if (e.id === id) return { ...e, ...patch };
+            if (e.id === projected.templateId && e.recurringMonthly) {
+              return { ...e, ...templatePatch };
+            }
+            return e;
+          }),
+        );
+        void (async () => {
+          const cloud = await waitForCloudContext();
+          if (!cloud || !isStandardUuid(projected.templateId)) return;
+          const body = buildSupabaseExpenseUpdateBody(templatePatch);
+          if (Object.keys(body).length === 0) return;
+          const { error } = await supabase
+            .from("expenses")
+            .update(body)
+            .eq("id", projected.templateId)
+            .eq("household_id", cloud.householdId);
+          if (error) {
+            console.error("[Expenses] Cloud update failed", {
+              expenseId: projected.templateId,
+              error: error.message,
+            });
+          }
+        })();
+        return;
+      }
+
       setExpenses((prev) =>
         prev.map((e) => (e.id === id ? { ...e, ...patch } : e)),
       );
+
+      if (!isStandardUuid(id)) {
+        if (parseLegacyInstallmentCompositeId(id)) {
+          console.warn(
+            "[Expenses] Skipping cloud update for legacy installment id; UI updated locally only",
+            id,
+          );
+        }
+        return;
+      }
+
       void (async () => {
         const cloud = await waitForCloudContext();
         if (!cloud) return;
+        const body = buildSupabaseExpenseUpdateBody(patch);
+        if (Object.keys(body).length === 0) return;
         const { error } = await supabase
           .from("expenses")
-          .update({
-          amount: patch.amount,
-          category: patch.categoryId,
-          date: patch.date,
-          note: patch.note,
-          currency: patch.currency,
-          is_verified: patch.isVerified === true,
-          installments_info: {
-            installmentIndex: patch.installmentIndex,
-            installments: patch.installments,
-            paymentMethodId: patch.paymentMethodId,
-            type: patch.type,
-          },
-          is_recurring: patch.recurringMonthly === true,
-        })
-        .eq("id", id)
+          .update(body)
+          .eq("id", id)
           .eq("household_id", cloud.householdId);
         if (error) {
           console.error("[Expenses] Cloud update failed", { expenseId: id, error: error.message });
@@ -1338,6 +1436,28 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
   );
 
   const removeExpense = useCallback(async (id: string) => {
+    const projected = parseProjectedRecurringId(id);
+    if (projected) {
+      setRecurringIncomeSkips((prev) => {
+        const cur = new Set(prev[projected.templateId] ?? []);
+        cur.add(projected.ym);
+        return { ...prev, [projected.templateId]: [...cur] };
+      });
+      setExpenses((prev) => prev.filter((e) => e.id !== id));
+      return { ok: true as const };
+    }
+
+    if (!isStandardUuid(id)) {
+      if (parseLegacyInstallmentCompositeId(id)) {
+        console.warn(
+          "[Expenses] Removing legacy installment row locally only (id is not a UUID)",
+          id,
+        );
+      }
+      setExpenses((prev) => prev.filter((e) => e.id !== id));
+      return { ok: true as const };
+    }
+
     const cloud = await waitForCloudContext();
     if (!cloud) {
       return { ok: false as const, error: "אין חיבור לחשבון. נסה שוב בעוד רגע." };

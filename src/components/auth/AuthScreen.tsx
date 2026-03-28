@@ -153,7 +153,7 @@ export function AuthScreen() {
             ) : null}
             {localizedError ? <p className="text-sm text-destructive">{localizedError}</p> : null}
             {showEmailConfirmHint ? (
-              <p className="text-xs text-muted-foreground">
+              <p className="text-sm leading-relaxed text-muted-foreground">
                 אם זה חשבון חדש, יש לאשר את ההרשמה במייל ורק אז להתחבר.
               </p>
             ) : null}
@@ -175,7 +175,7 @@ export function AuthScreen() {
   <div className="absolute inset-0 flex items-center">
     <span className="w-full border-t border-gray-300"></span>
   </div>
-  <div className="relative flex justify-center text-xs uppercase">
+  <div className="relative flex justify-center text-sm leading-relaxed uppercase">
     <span className="bg-background px-2 text-muted-foreground">או המשך עם</span>
   </div>
 </div>

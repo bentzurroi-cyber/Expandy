@@ -64,6 +64,7 @@ export function ExpenseEntryForm() {
   const [recurringMonthly, setRecurringMonthly] = useState(false);
   const [note, setNote] = useState("");
   const [hint, setHint] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
   const [txDate, setTxDate] = useState(() => formatLocalIsoDate(new Date()));
   const [addCategoryOpen, setAddCategoryOpen] = useState(false);
   const [addMethodOpen, setAddMethodOpen] = useState(false);
@@ -109,11 +110,14 @@ export function ExpenseEntryForm() {
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
+    if (submitting) return;
     const parsed = parseNumericInput(amount);
     if (parsed == null || !Number.isFinite(parsed) || parsed <= 0) {
       setHint(t.amountInvalid);
       return;
     }
+    setSubmitting(true);
+    try {
     const result = await addExpense({
       date: txDate,
       amount: Math.round(parsed * 100) / 100,
@@ -136,6 +140,9 @@ export function ExpenseEntryForm() {
     setRecurringMonthly(false);
     setHint(null);
     toast.success("הנתונים הוזנו בהצלחה", { duration: 3000 });
+    } finally {
+      setSubmitting(false);
+    }
   }
 
   return (
@@ -193,8 +200,8 @@ export function ExpenseEntryForm() {
           </div>
           <div className="flex justify-center">
             <Select value={currency} onValueChange={onCurrencySelect}>
-              <SelectTrigger className="h-10 w-[min(100%,14rem)] rounded-full border-border/70 bg-background/60">
-                <div className="flex min-w-0 flex-1 items-center gap-2">
+              <SelectTrigger className="min-h-11 w-[min(100%,14rem)] rounded-full border-border/70 bg-background/60 px-4 py-2.5 text-base leading-relaxed">
+                <div className="flex min-w-0 flex-1 items-center gap-2.5">
                   <CurrencyGlyph iconKey={currencyMeta.iconKey} className="size-4" />
                   <SelectValue placeholder={currencyOptionLabel(currencyMeta)} />
                 </div>
@@ -297,7 +304,7 @@ export function ExpenseEntryForm() {
 
       {/* Bottom sticky action */}
       <div className="sticky bottom-0 bg-background pt-4 pb-[calc(env(safe-area-inset-bottom)+1rem)]">
-        <Button type="submit" className="h-12 w-full text-base">
+        <Button type="submit" disabled={submitting} className="h-12 w-full text-base">
           {entryType === "income" ? t.addIncome : t.addExpenseCta}
         </Button>
       </div>

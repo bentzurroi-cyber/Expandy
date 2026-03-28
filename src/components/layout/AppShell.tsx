@@ -13,7 +13,7 @@ type AppShellProps = {
 
 const tabClass = (active: boolean) =>
   cn(
-    "flex flex-1 flex-col items-center gap-0.5 py-2.5 text-[10px] font-medium leading-tight transition-colors sm:gap-1 sm:py-3 sm:text-xs",
+    "flex flex-1 flex-col items-center gap-0.5 py-2.5 text-sm font-medium leading-relaxed transition-colors sm:gap-1 sm:py-3",
     active ? "text-foreground" : "text-muted-foreground hover:text-foreground",
   );
 
@@ -34,7 +34,7 @@ export function AppShell({ view, onViewChange, children }: AppShellProps) {
               <p className="truncate text-sm font-semibold tracking-tight">
                 {t.appName}
               </p>
-              <p className="truncate text-xs text-muted-foreground">
+              <p className="truncate text-sm leading-relaxed text-muted-foreground">
                 {t.appTagline}
               </p>
             </div>

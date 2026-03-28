@@ -307,7 +307,7 @@ export function AssetsView() {
                 <button
                   key={p.id}
                   type="button"
-                  className="rounded-full border border-border/70 bg-muted/30 px-3 py-1 text-xs text-foreground hover:bg-accent/40"
+                  className="rounded-full border border-border/70 bg-muted/30 px-3 py-1 text-sm leading-relaxed text-foreground hover:bg-accent/40"
                   onClick={() => setAddName(p.name)}
                 >
                   {p.name}
@@ -356,7 +356,7 @@ export function AssetsView() {
               >
                 <div className="flex min-w-0 flex-col gap-1">
                   <p className="truncate text-sm font-medium">{a.name}</p>
-                  <p className="text-xs text-muted-foreground">{typeNameById.get(a.type) ?? a.type}</p>
+                  <p className="text-sm leading-relaxed text-muted-foreground">{typeNameById.get(a.type) ?? a.type}</p>
                 </div>
                 <p className="text-base font-semibold tabular-nums">
                   {formatIls(convertToILS(a.balance, a.currency ?? "ILS", `${currentMonth}-01`))}
@@ -382,7 +382,7 @@ export function AssetsView() {
               </PopoverTrigger>
               <PopoverContent className="w-[min(95vw,30rem)] space-y-4 p-4" dir={dir}>
                 <div className="space-y-2">
-                  <p className="text-xs font-medium text-muted-foreground">{t.assetChartFilterTypes}</p>
+                  <p className="text-sm leading-relaxed font-medium text-muted-foreground">{t.assetChartFilterTypes}</p>
                   <div className="flex flex-wrap gap-2">
                     {assetTypes.map((typ) => {
                       const on = assetTypeFilterOn[typ.id] !== false;
@@ -391,7 +391,7 @@ export function AssetsView() {
                           key={typ.id}
                           type="button"
                           className={cn(
-                            "rounded-full border px-2.5 py-1 text-xs",
+                            "rounded-full border px-2.5 py-1 text-sm leading-relaxed",
                             on
                               ? "border-primary/60 bg-primary/10 text-foreground"
                               : "border-border/60 bg-muted/30 text-muted-foreground opacity-70",
@@ -414,7 +414,7 @@ export function AssetsView() {
                   </div>
                 </div>
                 <div className="space-y-2">
-                  <p className="text-xs font-medium text-muted-foreground">{t.assetChartFilterAssets}</p>
+                  <p className="text-sm leading-relaxed font-medium text-muted-foreground">{t.assetChartFilterAssets}</p>
                   <div className="max-h-36 space-y-1 overflow-auto rounded-lg border border-border/60 p-2">
                     {assetSeries.map((asset) => {
                       const on = assetChartOn[asset.key] !== false;
@@ -478,9 +478,9 @@ export function AssetsView() {
                 </div>
               </PopoverContent>
             </Popover>
-            <label className="inline-flex items-center gap-2 text-xs text-muted-foreground">
+            <label className="inline-flex items-center gap-2 text-sm leading-relaxed text-muted-foreground">
               <Select value={assetChartMode} onValueChange={(v) => setAssetChartMode(v as "total" | "assets")}>
-                <SelectTrigger className="h-8 w-[10rem]">
+                <SelectTrigger className="min-h-10 w-[10rem]">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent position="popper">
@@ -520,7 +520,7 @@ export function AssetsView() {
                       return (
                         <div className="rounded-md border border-border bg-popover px-3 py-2 text-sm shadow-md" dir={dir}>
                           <p className="font-medium tabular-nums">{formatIlsCompact(v)}</p>
-                          {ym ? <p className="text-xs text-muted-foreground">{hebrewMonthYearLabel(ym)}</p> : null}
+                          {ym ? <p className="text-sm leading-relaxed text-muted-foreground">{hebrewMonthYearLabel(ym)}</p> : null}
                         </div>
                       );
                     }}
@@ -564,7 +564,7 @@ export function AssetsView() {
               </div>
               <div className="border-b border-border/60 px-3 py-2">
                 <Select value={listViewYm} onValueChange={(v) => setListViewYm(v as YearMonth)}>
-                  <SelectTrigger className="h-8 w-[11rem]">
+                  <SelectTrigger className="min-h-10 w-[11rem]">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent position="popper">
@@ -576,7 +576,7 @@ export function AssetsView() {
                   </SelectContent>
                 </Select>
               </div>
-              <div className="grid grid-cols-[1fr_auto] gap-2 border-b border-border/60 px-3 py-2 text-xs text-muted-foreground">
+              <div className="grid grid-cols-[1fr_auto] gap-2 border-b border-border/60 px-3 py-2 text-sm leading-relaxed text-muted-foreground">
                 <span>{t.assetSnapshotName}</span>
                 <span>{t.totalNetWorth}</span>
               </div>
