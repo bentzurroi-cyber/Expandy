@@ -50,8 +50,18 @@ import {
   parseLegacyInstallmentCompositeId,
   parseProjectedRecurringId,
 } from "@/lib/expenseIds";
+import { capReceiptUrls, MAX_RECEIPT_IMAGES } from "@/lib/receiptConstants";
+import { uploadReceiptImagesParallel } from "@/lib/receiptUpload";
+import { toast } from "sonner";
 
 const STORAGE_KEY = "expandy-expenses-v1";
+
+export type AddExpenseInput = Omit<Expense, "id"> & { receiptFiles?: File[] };
+
+/** `receiptUrls: null` clears all receipts in DB and local state. Omit the key to leave unchanged. */
+export type ExpenseUpdatePatch = Partial<Omit<Expense, "id" | "receiptUrls">> & {
+  receiptUrls?: string[] | null;
+};
 const STORAGE_INCOME_SOURCES = "expandy-income-sources-v1";
 const STORAGE_DEST_ACCOUNTS = "expandy-destination-accounts-v1";
 const STORAGE_EXPENSE_CATEGORIES = "expandy-expense-categories-v1";
@@ -123,6 +133,16 @@ function isValidExpenseShape(row: unknown): row is Expense {
   ) {
     return false;
   }
+  if (typeof r.receiptUrls !== "undefined") {
+    if (!Array.isArray(r.receiptUrls)) return false;
+    if (!r.receiptUrls.every((x) => typeof x === "string")) return false;
+  }
+  if (
+    typeof (r as { receiptUrl?: unknown }).receiptUrl !== "undefined" &&
+    typeof (r as { receiptUrl?: unknown }).receiptUrl !== "string"
+  ) {
+    return false;
+  }
   return (
     typeof r.id === "string" &&
     typeof r.date === "string" &&
@@ -165,6 +185,12 @@ function readStoredExpenses(): Expense[] {
             : 1,
         recurringMonthly: r.recurringMonthly === true,
         ...(r.isVerified === true ? { isVerified: true } : {}),
+        ...(Array.isArray(r.receiptUrls) && r.receiptUrls.length
+          ? { receiptUrls: capReceiptUrls(r.receiptUrls as string[]) }
+          : typeof (r as { receiptUrl?: unknown }).receiptUrl === "string" &&
+              (r as { receiptUrl: string }).receiptUrl.trim()
+            ? { receiptUrls: capReceiptUrls([(r as { receiptUrl: string }).receiptUrl.trim()]) }
+            : {}),
       });
     }
     return dedupeExpenseRows(out);
@@ -317,9 +343,7 @@ function projectedRecurringId(templateId: string, ym: string): string {
   return `rec|${templateId}|${ym}`;
 }
 
-function buildSupabaseExpenseUpdateBody(
-  patch: Partial<Omit<Expense, "id">>,
-): Record<string, unknown> {
+function buildSupabaseExpenseUpdateBody(patch: ExpenseUpdatePatch): Record<string, unknown> {
   const body: Record<string, unknown> = {};
   if (patch.amount !== undefined) body.amount = patch.amount;
   if (patch.categoryId !== undefined) body.category = patch.categoryId;
@@ -344,6 +368,13 @@ function buildSupabaseExpenseUpdateBody(
   }
   if (patch.type !== undefined) ii.type = patch.type;
   if (Object.keys(ii).length > 0) body.installments_info = ii;
+  if (patch.receiptUrls !== undefined) {
+    if (patch.receiptUrls === null || patch.receiptUrls.length === 0) {
+      body.receipt_urls = null;
+    } else {
+      body.receipt_urls = capReceiptUrls(patch.receiptUrls);
+    }
+  }
   return body;
 }
 
@@ -367,7 +398,10 @@ type SupabaseExpenseRow = {
     type?: Expense["type"];
   } | null;
   is_recurring: boolean;
+  receipt_urls?: string[] | null;
 };
+
+type PaymentMethodOverride = CategoryOverride;
 
 type HouseholdAppState = {
   customIncomeSources?: Category[];
@@ -380,10 +414,22 @@ type HouseholdAppState = {
   recurringIncomeSkips?: Record<string, string[]>;
   deletedBuiltinExpenseCategoryIds?: string[];
   deletedBuiltinIncomeSourceIds?: string[];
+  paymentMethodOverrides?: Record<string, PaymentMethodOverride>;
+  destinationAccountOverrides?: Record<string, PaymentMethodOverride>;
+  deletedBuiltinPaymentMethodIds?: string[];
+  deletedBuiltinDestinationAccountIds?: string[];
   expenseCategoryOrder?: string[];
   incomeCategoryOrder?: string[];
   quickAccessCount?: number;
 };
+
+function receiptUrlsFromDbRow(row: SupabaseExpenseRow): string[] | undefined {
+  const fromArr = Array.isArray(row.receipt_urls)
+    ? row.receipt_urls.filter((x): x is string => typeof x === "string" && x.trim().length > 0)
+    : [];
+  const capped = capReceiptUrls(fromArr);
+  return capped.length ? capped : undefined;
+}
 
 function mapDbExpenseToApp(row: SupabaseExpenseRow): Expense {
   const colType = row.entry_type === "income" ? "income" : row.entry_type === "expense" ? "expense" : undefined;
@@ -396,6 +442,7 @@ function mapDbExpenseToApp(row: SupabaseExpenseRow): Expense {
     typeof row.payment_method_id === "string" && row.payment_method_id.length > 0
       ? row.payment_method_id
       : row.installments_info?.paymentMethodId ?? "";
+  const receiptUrls = receiptUrlsFromDbRow(row);
   return {
     id: row.id,
     date: row.date,
@@ -409,6 +456,7 @@ function mapDbExpenseToApp(row: SupabaseExpenseRow): Expense {
     installmentIndex: Math.max(1, Math.floor(row.installments_info?.installmentIndex ?? 1)),
     recurringMonthly: row.is_recurring === true,
     ...(row.is_verified ? { isVerified: true } : {}),
+    ...(receiptUrls?.length ? { receiptUrls } : {}),
   };
 }
 
@@ -422,15 +470,30 @@ type ExpensesContextValue = {
   expensesForMonth: (ym: `${number}-${number}`) => Expense[];
   /** Ensure recurring templates are instantiated into state for a month. */
   materializeRecurringForMonth: (ym: `${number}-${number}`) => void;
-  addExpense: (input: Omit<Expense, "id">) => Promise<{ ok: true } | { ok: false; error: string }>;
+  addExpense: (input: AddExpenseInput) => Promise<{ ok: true } | { ok: false; error: string }>;
   /** CSV import (Hebrew headers) with strict dedupe */
   importData: (
     rows: RawImportedEntry[],
   ) => { imported: number; skipped: number; newCategories: number; newMethods: number };
-  updateExpense: (
+  /** Bulk insert income rows (validated); persists to Supabase when connected. */
+  bulkImportIncomes: (
+    rows: Omit<Expense, "id">[],
+  ) => Promise<{ ok: true; count: number } | { ok: false; error: string }>;
+  /** Bulk insert expense rows (validated); persists to Supabase when connected. */
+  bulkImportExpenses: (
+    rows: Omit<Expense, "id">[],
+  ) => Promise<{ ok: true; count: number } | { ok: false; error: string }>;
+  updateExpense: (id: string, patch: ExpenseUpdatePatch) => void;
+  /**
+   * Awaits Supabase update before updating local state. Use when persistence must be confirmed
+   * (e.g. receipt upload + DB row in one flow).
+   */
+  updateExpenseAsync: (
     id: string,
-    patch: Partial<Omit<Expense, "id">>,
-  ) => void;
+    patch: ExpenseUpdatePatch,
+  ) => Promise<{ ok: true } | { ok: false; error: string }>;
+  /** Wait until session + household are ready for Storage / Supabase writes. */
+  waitForCloudContext: () => Promise<{ userId: string; householdId: string } | null>;
   removeExpense: (id: string) => Promise<{ ok: true } | { ok: false; error: string }>;
   expenseCategories: Category[];
   incomeSources: Category[];
@@ -507,9 +570,20 @@ function sleep(ms: number) {
   return new Promise<void>((resolve) => window.setTimeout(resolve, ms));
 }
 
+function showSupabaseInsertError(error: unknown) {
+  const msg =
+    error instanceof Error
+      ? error.message
+      : typeof error === "string"
+        ? error
+        : "Database write failed";
+  toast.error(msg);
+}
+
 export function ExpensesProvider({ children }: { children: ReactNode }) {
   const { mergeBudgetOnExpenseCategoryDeleted } = useBudgets();
   const { user, profile, session, loading: authLoading } = useAuth();
+  const householdId = normalizeHouseholdCode(profile?.household_id ?? "");
   const [expenses, setExpenses] = useState<Expense[]>([]);
   const [expenseCategoryOverrides, setExpenseCategoryOverrides] = useState<
     Record<string, CategoryOverride>
@@ -575,6 +649,17 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
     useState<Set<string>>(() => readDeletedBuiltinIds(STORAGE_DELETED_BUILTIN_EXPENSE_CATS));
   const [deletedBuiltinIncomeSourceIds, setDeletedBuiltinIncomeSourceIds] =
     useState<Set<string>>(() => readDeletedBuiltinIds(STORAGE_DELETED_BUILTIN_INCOME_CATS));
+  const [paymentMethodOverrides, setPaymentMethodOverrides] = useState<
+    Record<string, PaymentMethodOverride>
+  >({});
+  const [destinationAccountOverrides, setDestinationAccountOverrides] = useState<
+    Record<string, PaymentMethodOverride>
+  >({});
+  const [deletedBuiltinPaymentMethodIds, setDeletedBuiltinPaymentMethodIds] = useState<
+    Set<string>
+  >(new Set());
+  const [deletedBuiltinDestinationAccountIds, setDeletedBuiltinDestinationAccountIds] =
+    useState<Set<string>>(new Set());
   const [expenseCategoryOrder, setExpenseCategoryOrder] = useState<string[]>(
     () => readExpenseCategoryOrder(),
   );
@@ -616,30 +701,44 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     async function loadHouseholdExpenses() {
-      if (!profile?.household_id) {
-        setExpenses([]);
+      if (authLoading || !session || !user?.id) {
         return;
       }
-      const { data, error } = await supabase
-        .from("expenses")
-        .select(
-          "id, user_id, household_id, amount, category, date, note, currency, is_verified, installments_info, is_recurring, entry_type, payment_method_id",
-        )
-        .eq("household_id", profile.household_id)
-        .order("date", { ascending: false });
-      if (error || !data) return;
-      const mapped = (data as SupabaseExpenseRow[])
-        .map(mapDbExpenseToApp)
-        .filter(isValidExpenseShape);
-      setExpenses(dedupeExpenseRows(mapped));
+      if (!isValidHouseholdCode(householdId)) {
+        console.log("[Expenses] Skipping fetch until household_id is ready", {
+          householdId,
+        });
+        return;
+      }
+      try {
+        const { data, error } = await supabase
+          .from("expenses")
+          .select(
+          "id, user_id, household_id, amount, category, date, note, currency, is_verified, installments_info, is_recurring, entry_type, payment_method_id, receipt_urls",
+          )
+          .eq("household_id", householdId)
+          .order("date", { ascending: false });
+        console.log("Fetch Result:", data, "Fetch Error:", error);
+        if (error) {
+          console.error("SELECT ERROR:", error.message);
+          return;
+        }
+        if (!data) return;
+        const mapped = (data as SupabaseExpenseRow[])
+          .map(mapDbExpenseToApp)
+          .filter(isValidExpenseShape);
+        setExpenses(dedupeExpenseRows(mapped));
+      } catch (error) {
+        console.error("SELECT ERROR:", error);
+      }
     }
     void loadHouseholdExpenses();
-  }, [profile?.household_id]);
+  }, [authLoading, householdId, session, user?.id]);
 
   useEffect(() => {
     async function migrateLocalDataOnce() {
-      if (!profile?.household_id || !user?.id) return;
-      const migrationKey = `expandy-migrated-${profile.household_id}`;
+      if (!isValidHouseholdCode(householdId) || !user?.id) return;
+      const migrationKey = `expandy-migrated-${householdId}`;
       if (localStorage.getItem(migrationKey) === "1") return;
       const hasLocalData = EXPANDY_APP_DATA_STORAGE_KEYS.some((key) => {
         try {
@@ -656,7 +755,7 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
       const { count: existingExpenses = 0 } = await supabase
         .from("expenses")
         .select("id", { head: true, count: "exact" })
-        .eq("household_id", profile.household_id);
+        .eq("household_id", householdId);
 
       if (existingExpenses === 0) {
         const localExpenses = readStoredExpenses().filter((row) => {
@@ -669,7 +768,7 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
             localExpenses.map((row) => ({
               id: row.id,
               user_id: user.id,
-              household_id: profile.household_id,
+              household_id: householdId,
               amount: row.amount,
               category: row.categoryId,
               date: row.date,
@@ -685,6 +784,9 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
               entry_type: row.type,
               payment_method_id: row.paymentMethodId,
               is_recurring: row.recurringMonthly === true,
+              ...(row.receiptUrls?.length
+                ? { receipt_urls: capReceiptUrls(row.receiptUrls) }
+                : {}),
             })),
           );
         }
@@ -710,7 +812,7 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
                   ? s.accounts.map((a) => ({
                       id: `${a.id}__${s.ym}`,
                       user_id: user.id,
-                      household_id: profile.household_id,
+                      household_id: householdId,
                       name: a.name,
                       type: a.type,
                       balance: Number(a.balance) || 0,
@@ -732,7 +834,7 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
         try {
           const parsed = JSON.parse(rawBudgets) as Record<string, number>;
           await supabase.from("settings").upsert({
-            household_id: profile.household_id,
+            household_id: householdId,
             budget_limits: parsed,
           });
         } catch {
@@ -744,7 +846,7 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
       localStorage.setItem(migrationKey, "1");
     }
     void migrateLocalDataOnce();
-  }, [profile?.household_id, user?.id]);
+  }, [householdId, user?.id]);
 
   const incomeSourcesForStorage = useMemo(
     () => dedupeCategoriesByName(customIncomeSources),
@@ -772,14 +874,14 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
   );
   useEffect(() => {
     async function loadHouseholdSettings() {
-      if (!profile?.household_id) {
+      if (!isValidHouseholdCode(householdId)) {
         setSupabaseStateReady(true);
         return;
       }
       const { data } = await supabase
         .from("settings")
         .select("app_state")
-        .eq("household_id", profile.household_id)
+        .eq("household_id", householdId)
         .maybeSingle();
       const appState = (data?.app_state ?? {}) as HouseholdAppState;
       if (appState.customIncomeSources) {
@@ -821,13 +923,27 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
       if (typeof appState.quickAccessCount === "number") {
         setQuickAccessCountState(Math.max(1, Math.min(8, Math.floor(appState.quickAccessCount))));
       }
+      if (appState.paymentMethodOverrides) {
+        setPaymentMethodOverrides(appState.paymentMethodOverrides);
+      }
+      if (appState.destinationAccountOverrides) {
+        setDestinationAccountOverrides(appState.destinationAccountOverrides);
+      }
+      if (appState.deletedBuiltinPaymentMethodIds?.length) {
+        setDeletedBuiltinPaymentMethodIds(new Set(appState.deletedBuiltinPaymentMethodIds));
+      }
+      if (appState.deletedBuiltinDestinationAccountIds?.length) {
+        setDeletedBuiltinDestinationAccountIds(
+          new Set(appState.deletedBuiltinDestinationAccountIds),
+        );
+      }
       setSupabaseStateReady(true);
     }
     void loadHouseholdSettings();
-  }, [profile?.household_id]);
+  }, [householdId]);
 
   useEffect(() => {
-    if (!profile?.household_id || !supabaseStateReady) return;
+    if (!isValidHouseholdCode(householdId) || !supabaseStateReady) return;
     const payload: HouseholdAppState = {
       customIncomeSources: incomeSourcesForStorage,
       customDestinationAccounts: destinationAccountsForStorage,
@@ -839,18 +955,22 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
       recurringIncomeSkips,
       deletedBuiltinExpenseCategoryIds: [...deletedBuiltinExpenseCategoryIds],
       deletedBuiltinIncomeSourceIds: [...deletedBuiltinIncomeSourceIds],
+      paymentMethodOverrides,
+      destinationAccountOverrides,
+      deletedBuiltinPaymentMethodIds: [...deletedBuiltinPaymentMethodIds],
+      deletedBuiltinDestinationAccountIds: [...deletedBuiltinDestinationAccountIds],
       expenseCategoryOrder,
       incomeCategoryOrder,
       quickAccessCount,
     };
     void supabase.from("settings").upsert({
-      household_id: profile.household_id,
+      household_id: householdId,
       budget_limits: {},
       currencies_list: currenciesForStorage.map((x) => x.code),
       app_state: payload,
     });
   }, [
-    profile?.household_id,
+    householdId,
     supabaseStateReady,
     incomeSourcesForStorage,
     destinationAccountsForStorage,
@@ -862,19 +982,23 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
     recurringIncomeSkips,
     deletedBuiltinExpenseCategoryIds,
     deletedBuiltinIncomeSourceIds,
+    paymentMethodOverrides,
+    destinationAccountOverrides,
+    deletedBuiltinPaymentMethodIds,
+    deletedBuiltinDestinationAccountIds,
     expenseCategoryOrder,
     incomeCategoryOrder,
     quickAccessCount,
   ]);
 
   useEffect(() => {
-    if (!profile?.household_id || !supabaseStateReady) return;
+    if (!isValidHouseholdCode(householdId) || !supabaseStateReady) return;
     const expensePos = new Map(expenseCategoryOrder.map((id, i) => [id, i] as const));
     const incomePos = new Map(incomeCategoryOrder.map((id, i) => [id, i] as const));
     const rows = [
       ...expenseCategoriesForStorage.map((c) => ({
         id: c.id,
-        household_id: profile.household_id,
+        household_id: householdId,
         name: c.name,
         type: "expense",
         color: c.color,
@@ -883,7 +1007,7 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
       })),
       ...incomeSourcesForStorage.map((c) => ({
         id: c.id,
-        household_id: profile.household_id,
+        household_id: householdId,
         name: c.name,
         type: "income",
         color: c.color,
@@ -894,7 +1018,7 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
     if (!rows.length) return;
     void supabase.from("categories").upsert(rows);
   }, [
-    profile?.household_id,
+    householdId,
     supabaseStateReady,
     expenseCategoriesForStorage,
     incomeSourcesForStorage,
@@ -902,11 +1026,17 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
     incomeCategoryOrder,
   ]);
 
-  const addExpense = useCallback(async (input: Omit<Expense, "id">) => {
+  const addExpense = useCallback(async (rawInput: AddExpenseInput) => {
     const cloud = await waitForCloudContext();
     if (!cloud) {
+      console.error("Missing household_id. Cannot save data.");
       return { ok: false as const, error: "אין חיבור לחשבון. נסה שוב בעוד רגע." };
     }
+
+    const { receiptFiles, ...input } = rawInput;
+    const receiptFileList = (receiptFiles ?? [])
+      .filter((f): f is File => f instanceof File)
+      .slice(0, MAX_RECEIPT_IMAGES);
 
     let rows: Expense[] = [];
     if (input.type === "expense" && input.recurringMonthly) {
@@ -955,6 +1085,29 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
       }
     }
 
+    if (receiptFileList.length && rows[0]) {
+      const up = await uploadReceiptImagesParallel({
+        householdId: cloud.householdId,
+        userId: cloud.userId,
+        expenseId: rows[0]!.id,
+        files: receiptFileList,
+      });
+      if ("error" in up) {
+        return {
+          ok: false as const,
+          error: `העלאת הקבלה נכשלה: ${up.error}`,
+        };
+      }
+      const urls = capReceiptUrls(up.urls);
+      if (!urls.length) {
+        return {
+          ok: false as const,
+          error: "העלאת הקבלה נכשלה: לא התקבלו קישורים לתמונות.",
+        };
+      }
+      rows = rows.map((r) => ({ ...r, receiptUrls: urls }));
+    }
+
     const payload = rows.map((row) => ({
       id: row.id,
       user_id: cloud.userId,
@@ -974,14 +1127,28 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
         type: row.type,
       },
       is_recurring: row.recurringMonthly === true,
+      receipt_urls:
+        row.receiptUrls?.length ? capReceiptUrls(row.receiptUrls) : null,
     }));
-    const { error } = await supabase.from("expenses").upsert(payload);
-    if (error) {
-      console.error("[Expenses] Cloud write failed", { error: error.message });
-      return { ok: false as const, error: `שמירה לענן נכשלה: ${error.message}` };
-    }
-
+    const optimisticIds = new Set(rows.map((r) => r.id));
     setExpenses((prev) => [...prev, ...rows]);
+    try {
+      const { error } = await supabase.from("expenses").upsert(payload);
+      if (error) {
+        console.error(error);
+        showSupabaseInsertError(error);
+        setExpenses((prev) => prev.filter((x) => !optimisticIds.has(x.id)));
+        return { ok: false as const, error: `שמירה לענן נכשלה: ${error.message}` };
+      }
+    } catch (error) {
+      console.error(error);
+      showSupabaseInsertError(error);
+      setExpenses((prev) => prev.filter((x) => !optimisticIds.has(x.id)));
+      return {
+        ok: false as const,
+        error: error instanceof Error ? error.message : "שמירה לענן נכשלה",
+      };
+    }
     return { ok: true as const };
   }, [waitForCloudContext]);
 
@@ -1089,14 +1256,44 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
     deletedBuiltinIncomeSourceIds,
     incomeCategoryOrder,
   ]);
-  const destinationAccounts = useMemo(
-    () => [...MOCK_DESTINATION_ACCOUNTS, ...customDestinationAccounts],
-    [customDestinationAccounts],
-  );
-  const paymentMethods = useMemo(
-    () => [...MOCK_PAYMENT_METHODS, ...customPaymentMethods],
-    [customPaymentMethods],
-  );
+  const destinationAccounts = useMemo(() => {
+    const apply = (m: PaymentMethod): PaymentMethod => {
+      const o = destinationAccountOverrides[m.id];
+      if (!o) return m;
+      return {
+        ...m,
+        name: typeof o.name === "string" ? o.name : m.name,
+        iconKey: normalizeCategoryIconKey(o.iconKey ?? m.iconKey),
+        color: typeof o.color === "string" ? o.color : m.color,
+      };
+    };
+    const base = MOCK_DESTINATION_ACCOUNTS.filter(
+      (m) => !deletedBuiltinDestinationAccountIds.has(m.id),
+    ).map(apply);
+    const custom = customDestinationAccounts.map(apply);
+    return [...base, ...custom];
+  }, [
+    customDestinationAccounts,
+    destinationAccountOverrides,
+    deletedBuiltinDestinationAccountIds,
+  ]);
+  const paymentMethods = useMemo(() => {
+    const apply = (m: PaymentMethod): PaymentMethod => {
+      const o = paymentMethodOverrides[m.id];
+      if (!o) return m;
+      return {
+        ...m,
+        name: typeof o.name === "string" ? o.name : m.name,
+        iconKey: normalizeCategoryIconKey(o.iconKey ?? m.iconKey),
+        color: typeof o.color === "string" ? o.color : m.color,
+      };
+    };
+    const base = MOCK_PAYMENT_METHODS.filter(
+      (m) => !deletedBuiltinPaymentMethodIds.has(m.id),
+    ).map(apply);
+    const custom = customPaymentMethods.map(apply);
+    return [...base, ...custom];
+  }, [customPaymentMethods, paymentMethodOverrides, deletedBuiltinPaymentMethodIds]);
   const currencies = useMemo(
     () => [...CURRENCIES, ...customCurrencies],
     [customCurrencies],
@@ -1106,7 +1303,7 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
     [],
   );
 
-  function currencyToCode(input: string): string {
+  const currencyToCode = useCallback((input: string): string => {
     const s = input.trim();
     if (!s) return DEFAULT_CURRENCY;
     const exactCode = currencies.find((c) => c.code === s);
@@ -1118,7 +1315,7 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
     const byContains = currencies.find((c) => s.includes(c.code));
     if (byContains) return byContains.code;
     return DEFAULT_CURRENCY;
-  }
+  }, [currencies]);
 
   const importData = useCallback(
     (rows: RawImportedEntry[]) => {
@@ -1364,21 +1561,290 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
       incomeSources,
       destinationAccounts,
       paymentMethods,
-      currencies,
+      currencyToCode,
     ],
   );
 
-  const updateExpense = useCallback(
-    (id: string, patch: Partial<Omit<Expense, "id">>) => {
+  const bulkImportIncomes = useCallback(
+    async (rows: Omit<Expense, "id">[]) => {
+      try {
+        const cloud = await waitForCloudContext();
+        if (!cloud) {
+          console.error("Missing household_id. Cannot save data.");
+          return {
+            ok: false as const,
+            error: "אין חיבור לחשבון. נסה שוב בעוד רגע.",
+          };
+        }
+        if (!rows.length) return { ok: true as const, count: 0 };
+        for (const r of rows) {
+          if (r.type !== "income") {
+            return { ok: false as const, error: "רק הכנסות מותרות בייבוא זה." };
+          }
+        }
+        const withIds: Expense[] = rows.map((r) => ({
+          ...r,
+          id: newId(),
+        }));
+        for (const row of withIds) {
+          if (!isStandardUuid(row.id)) {
+            return { ok: false as const, error: "שמירה נכשלה: מזהה תנועה לא תקין." };
+          }
+        }
+        const payload = withIds.map((row) => ({
+          id: row.id,
+          user_id: cloud.userId,
+          household_id: cloud.householdId,
+          amount: Number(row.amount),
+          category: row.categoryId,
+          date: row.date,
+          note: row.note ?? "",
+          currency: row.currency,
+          is_verified: false,
+          entry_type: "income" as const,
+          payment_method_id: row.paymentMethodId,
+          installments_info: {
+            installmentIndex: row.installmentIndex,
+            installments: row.installments,
+            paymentMethodId: row.paymentMethodId,
+            type: row.type,
+          },
+          is_recurring: row.recurringMonthly === true,
+          receipt_urls: null as string[] | null,
+        }));
+        const optimisticIds = new Set(withIds.map((r) => r.id));
+        setExpenses((prev) => [...prev, ...withIds]);
+        try {
+          const { error } = await supabase.from("expenses").insert(payload);
+          if (error) {
+            console.error(error);
+            showSupabaseInsertError(error);
+            setExpenses((prev) => prev.filter((x) => !optimisticIds.has(x.id)));
+            return { ok: false as const, error: error.message };
+          }
+        } catch (error) {
+          console.error(error);
+          showSupabaseInsertError(error);
+          setExpenses((prev) => prev.filter((x) => !optimisticIds.has(x.id)));
+          return {
+            ok: false as const,
+            error: error instanceof Error ? error.message : "ייבוא הכנסות נכשל",
+          };
+        }
+        return { ok: true as const, count: withIds.length };
+      } catch (err) {
+        console.error("[Expenses] bulkImportIncomes crashed", err);
+        return {
+          ok: false as const,
+          error:
+            err instanceof Error
+              ? err.message
+              : "ייבוא הכנסות נכשל בשל שגיאה לא צפויה.",
+        };
+      }
+    },
+    [waitForCloudContext],
+  );
+
+  const bulkImportExpenses = useCallback(
+    async (rows: Omit<Expense, "id">[]) => {
+      try {
+        const cloud = await waitForCloudContext();
+        if (!cloud) {
+          console.error("Missing household_id. Cannot save data.");
+          return {
+            ok: false as const,
+            error: "אין חיבור לחשבון. נסה שוב בעוד רגע.",
+          };
+        }
+        if (!rows.length) return { ok: true as const, count: 0 };
+        for (const r of rows) {
+          if (r.type !== "expense") {
+            return { ok: false as const, error: "רק הוצאות מותרות בייבוא זה." };
+          }
+        }
+        const withIds: Expense[] = rows.map((r) => ({
+          ...r,
+          id: newId(),
+        }));
+        for (const row of withIds) {
+          if (!isStandardUuid(row.id)) {
+            return { ok: false as const, error: "שמירה נכשלה: מזהה תנועה לא תקין." };
+          }
+        }
+        const payload = withIds.map((row) => ({
+          id: row.id,
+          user_id: cloud.userId,
+          household_id: cloud.householdId,
+          amount: Number(row.amount),
+          category: row.categoryId,
+          date: row.date,
+          note: row.note ?? "",
+          currency: row.currency,
+          is_verified: false,
+          entry_type: "expense" as const,
+          payment_method_id: row.paymentMethodId,
+          installments_info: {
+            installmentIndex: row.installmentIndex,
+            installments: row.installments,
+            paymentMethodId: row.paymentMethodId,
+            type: row.type,
+          },
+          is_recurring: row.recurringMonthly === true,
+          receipt_urls: null as string[] | null,
+        }));
+        const optimisticIds = new Set(withIds.map((r) => r.id));
+        setExpenses((prev) => [...prev, ...withIds]);
+        try {
+          const { error } = await supabase.from("expenses").insert(payload);
+          if (error) {
+            console.error(error);
+            showSupabaseInsertError(error);
+            setExpenses((prev) => prev.filter((x) => !optimisticIds.has(x.id)));
+            return { ok: false as const, error: error.message };
+          }
+        } catch (error) {
+          console.error(error);
+          showSupabaseInsertError(error);
+          setExpenses((prev) => prev.filter((x) => !optimisticIds.has(x.id)));
+          return {
+            ok: false as const,
+            error: error instanceof Error ? error.message : "ייבוא הוצאות נכשל",
+          };
+        }
+        return { ok: true as const, count: withIds.length };
+      } catch (err) {
+        console.error("[Expenses] bulkImportExpenses crashed", err);
+        return {
+          ok: false as const,
+          error:
+            err instanceof Error
+              ? err.message
+              : "ייבוא הוצאות נכשל בשל שגיאה לא צפויה.",
+        };
+      }
+    },
+    [waitForCloudContext],
+  );
+
+  function mergeExpensePatch(e: Expense, patch: ExpenseUpdatePatch): Expense {
+    const merged = { ...e, ...patch } as Expense;
+    if (
+      patch.receiptUrls === null ||
+      (Array.isArray(patch.receiptUrls) && patch.receiptUrls.length === 0)
+    ) {
+      const { receiptUrls: _, ...rest } = merged;
+      void _;
+      return rest;
+    }
+    return merged;
+  }
+
+  const applyExpensePatchToSupabase = useCallback(
+    async (
+      id: string,
+      patch: ExpenseUpdatePatch,
+    ): Promise<{ ok: true } | { ok: false; error: string }> => {
       const projected = parseProjectedRecurringId(id);
       if (projected) {
-        const templatePatch: Partial<Omit<Expense, "id">> = { ...patch };
+        const templatePatch: ExpenseUpdatePatch = { ...patch };
+        delete templatePatch.date;
+        const cloud = await waitForCloudContext();
+        if (!cloud) {
+          return { ok: false, error: "אין חיבור לענן. נסה שוב בעוד רגע." };
+        }
+        if (!isStandardUuid(projected.templateId)) {
+          return { ok: false, error: "שמירה נכשלה: מזהה תבנית לא תקין." };
+        }
+        const body = buildSupabaseExpenseUpdateBody(templatePatch);
+        if (Object.keys(body).length === 0) return { ok: true };
+        const { error } = await supabase
+          .from("expenses")
+          .update(body)
+          .eq("id", projected.templateId)
+          .eq("household_id", cloud.householdId);
+        if (error) return { ok: false, error: error.message };
+        return { ok: true };
+      }
+
+      if (!isStandardUuid(id)) {
+        return { ok: false, error: "שמירה נכשלה: מזהה תנועה לא תקין לענן." };
+      }
+
+      const cloud = await waitForCloudContext();
+      if (!cloud) {
+        return { ok: false, error: "אין חיבור לענן. נסה שוב בעוד רגע." };
+      }
+      const body = buildSupabaseExpenseUpdateBody(patch);
+      if (Object.keys(body).length === 0) return { ok: true };
+      const { error } = await supabase
+        .from("expenses")
+        .update(body)
+        .eq("id", id)
+        .eq("household_id", cloud.householdId);
+      if (error) return { ok: false, error: error.message };
+      return { ok: true };
+    },
+    [waitForCloudContext],
+  );
+
+  const updateExpenseAsync = useCallback(
+    async (
+      id: string,
+      patch: ExpenseUpdatePatch,
+    ): Promise<{ ok: true } | { ok: false; error: string }> => {
+      const projected = parseProjectedRecurringId(id);
+      if (projected) {
+        const templatePatch: ExpenseUpdatePatch = { ...patch };
+        delete templatePatch.date;
+        const res = await applyExpensePatchToSupabase(id, patch);
+        if (!res.ok) return res;
+        setExpenses((prev) =>
+          prev.map((e) => {
+            if (e.id === id) return mergeExpensePatch(e, patch);
+            if (e.id === projected.templateId && e.recurringMonthly) {
+              return mergeExpensePatch(e, templatePatch);
+            }
+            return e;
+          }),
+        );
+        return { ok: true };
+      }
+
+      if (!isStandardUuid(id)) {
+        if (parseLegacyInstallmentCompositeId(id)) {
+          console.warn(
+            "[Expenses] Skipping cloud update for legacy installment id; UI updated locally only",
+            id,
+          );
+        }
+        setExpenses((prev) =>
+          prev.map((e) => (e.id === id ? mergeExpensePatch(e, patch) : e)),
+        );
+        return { ok: true };
+      }
+
+      const res = await applyExpensePatchToSupabase(id, patch);
+      if (!res.ok) return res;
+      setExpenses((prev) =>
+        prev.map((e) => (e.id === id ? mergeExpensePatch(e, patch) : e)),
+      );
+      return { ok: true };
+    },
+    [applyExpensePatchToSupabase],
+  );
+
+  const updateExpense = useCallback(
+    (id: string, patch: ExpenseUpdatePatch) => {
+      const projected = parseProjectedRecurringId(id);
+      if (projected) {
+        const templatePatch: ExpenseUpdatePatch = { ...patch };
         delete templatePatch.date;
         setExpenses((prev) =>
           prev.map((e) => {
-            if (e.id === id) return { ...e, ...patch };
+            if (e.id === id) return mergeExpensePatch(e, patch);
             if (e.id === projected.templateId && e.recurringMonthly) {
-              return { ...e, ...templatePatch };
+              return mergeExpensePatch(e, templatePatch);
             }
             return e;
           }),
@@ -1404,7 +1870,7 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
       }
 
       setExpenses((prev) =>
-        prev.map((e) => (e.id === id ? { ...e, ...patch } : e)),
+        prev.map((e) => (e.id === id ? mergeExpensePatch(e, patch) : e)),
       );
 
       if (!isStandardUuid(id)) {
@@ -1524,16 +1990,18 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
   const sortExpenses = useCallback(
     (rows: Expense[], sortBy: "newest" | "oldest" | "amountDesc" | "amountAsc") => {
       return [...rows].sort((a, b) => {
-        if (sortBy === "amountDesc") return b.amount - a.amount;
-        if (sortBy === "amountAsc") return a.amount - b.amount;
+        const aAmt = typeof a?.amount === "number" && Number.isFinite(a.amount) ? a.amount : 0;
+        const bAmt = typeof b?.amount === "number" && Number.isFinite(b.amount) ? b.amount : 0;
+        if (sortBy === "amountDesc") return bAmt - aAmt;
+        if (sortBy === "amountAsc") return aAmt - bAmt;
+        const ad = typeof a?.date === "string" ? a.date : "";
+        const bd = typeof b?.date === "string" ? b.date : "";
         const d =
-          sortBy === "oldest"
-            ? a.date.localeCompare(b.date)
-            : b.date.localeCompare(a.date);
+          sortBy === "oldest" ? ad.localeCompare(bd) : bd.localeCompare(ad);
         if (d !== 0) return d;
-        return sortBy === "oldest"
-          ? a.id.localeCompare(b.id)
-          : b.id.localeCompare(a.id);
+        const aid = typeof a?.id === "string" ? a.id : "";
+        const bid = typeof b?.id === "string" ? b.id : "";
+        return sortBy === "oldest" ? aid.localeCompare(bid) : bid.localeCompare(aid);
       });
     },
     [],
@@ -1795,6 +2263,20 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
           ? patch.color.trim()
           : undefined;
 
+      const isBuiltin = MOCK_PAYMENT_METHODS.some((m) => m.id === id);
+      if (isBuiltin) {
+        setPaymentMethodOverrides((prev) => ({
+          ...prev,
+          [id]: {
+            ...prev[id],
+            name: nextName ?? prev[id]?.name,
+            iconKey: nextIconKey ?? prev[id]?.iconKey,
+            color: nextColor ?? prev[id]?.color,
+          },
+        }));
+        return;
+      }
+
       setCustomPaymentMethods((prev) =>
         prev.map((m) =>
           m.id === id
@@ -1811,21 +2293,46 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
     [],
   );
 
-  const deletePaymentMethod = useCallback((id: string, moveToPaymentMethodId?: string) => {
-    const isBuiltin = MOCK_PAYMENT_METHODS.some((m) => m.id === id);
-    if (isBuiltin) return;
-    setCustomPaymentMethods((prev) => prev.filter((m) => m.id !== id));
-    const fallback = moveToPaymentMethodId ?? MOCK_PAYMENT_METHODS[0]?.id ?? "";
-    if (fallback && fallback !== id) {
-      setExpenses((prev) =>
-        prev.map((e) =>
+  const deletePaymentMethod = useCallback(
+    (id: string, moveToPaymentMethodId?: string) => {
+      const isBuiltin = MOCK_PAYMENT_METHODS.some((m) => m.id === id);
+      if (isBuiltin) {
+        setDeletedBuiltinPaymentMethodIds((prev) => new Set([...prev, id]));
+        setPaymentMethodOverrides((prev) => {
+          const next = { ...prev };
+          delete next[id];
+          return next;
+        });
+      } else {
+        setCustomPaymentMethods((prev) => prev.filter((m) => m.id !== id));
+      }
+
+      setExpenses((prev) => {
+        const touched = prev.some(
+          (e) => e.type === "expense" && e.paymentMethodId === id,
+        );
+        if (!touched) return prev;
+
+        let fallback = moveToPaymentMethodId ?? "";
+        if (!fallback || fallback === id) {
+          const mockFallback = MOCK_PAYMENT_METHODS.find((m) => m.id !== id)?.id;
+          fallback = mockFallback ?? "";
+        }
+        if (!fallback || fallback === id) {
+          const customFallback = customPaymentMethods.find((m) => m.id !== id)?.id;
+          fallback = customFallback ?? "";
+        }
+        if (!fallback || fallback === id) return prev;
+
+        return prev.map((e) =>
           e.type === "expense" && e.paymentMethodId === id
             ? { ...e, paymentMethodId: fallback }
             : e,
-        ),
-      );
-    }
-  }, []);
+        );
+      });
+    },
+    [customPaymentMethods],
+  );
 
   const updateDestinationAccount = useCallback(
     (id: string, patch: { name?: string; iconKey?: string; color?: string }) => {
@@ -1838,6 +2345,20 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
         typeof patch.color === "string" && patch.color.trim()
           ? patch.color.trim()
           : undefined;
+
+      const isBuiltin = MOCK_DESTINATION_ACCOUNTS.some((m) => m.id === id);
+      if (isBuiltin) {
+        setDestinationAccountOverrides((prev) => ({
+          ...prev,
+          [id]: {
+            ...prev[id],
+            name: nextName ?? prev[id]?.name,
+            iconKey: nextIconKey ?? prev[id]?.iconKey,
+            color: nextColor ?? prev[id]?.color,
+          },
+        }));
+        return;
+      }
 
       setCustomDestinationAccounts((prev) =>
         prev.map((m) =>
@@ -1858,20 +2379,42 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
   const deleteDestinationAccount = useCallback(
     (id: string, moveToDestinationAccountId?: string) => {
       const isBuiltin = MOCK_DESTINATION_ACCOUNTS.some((m) => m.id === id);
-      if (isBuiltin) return;
-      setCustomDestinationAccounts((prev) => prev.filter((m) => m.id !== id));
-      const fallback = moveToDestinationAccountId ?? MOCK_DESTINATION_ACCOUNTS[0]?.id ?? "";
-      if (fallback && fallback !== id) {
-        setExpenses((prev) =>
-          prev.map((e) =>
-            e.type === "income" && e.paymentMethodId === id
-              ? { ...e, paymentMethodId: fallback }
-              : e,
-          ),
-        );
+      if (isBuiltin) {
+        setDeletedBuiltinDestinationAccountIds((prev) => new Set([...prev, id]));
+        setDestinationAccountOverrides((prev) => {
+          const next = { ...prev };
+          delete next[id];
+          return next;
+        });
+      } else {
+        setCustomDestinationAccounts((prev) => prev.filter((m) => m.id !== id));
       }
+
+      setExpenses((prev) => {
+        const touched = prev.some(
+          (e) => e.type === "income" && e.paymentMethodId === id,
+        );
+        if (!touched) return prev;
+
+        let fallback = moveToDestinationAccountId ?? "";
+        if (!fallback || fallback === id) {
+          const mockFallback = MOCK_DESTINATION_ACCOUNTS.find((m) => m.id !== id)?.id;
+          fallback = mockFallback ?? "";
+        }
+        if (!fallback || fallback === id) {
+          const customFallback = customDestinationAccounts.find((m) => m.id !== id)?.id;
+          fallback = customFallback ?? "";
+        }
+        if (!fallback || fallback === id) return prev;
+
+        return prev.map((e) =>
+          e.type === "income" && e.paymentMethodId === id
+            ? { ...e, paymentMethodId: fallback }
+            : e,
+        );
+      });
     },
-    [],
+    [customDestinationAccounts],
   );
 
   const addCustomCurrency = useCallback((labelHe: string) => {
@@ -1925,12 +2468,12 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
   }, [builtinCurrencyCodes]);
 
   const clearAllUserData = useCallback(async () => {
-    if (profile?.household_id) {
+    if (isValidHouseholdCode(householdId)) {
       await Promise.all([
-        supabase.from("expenses").delete().eq("household_id", profile.household_id),
-        supabase.from("assets").delete().eq("household_id", profile.household_id),
-        supabase.from("categories").delete().eq("household_id", profile.household_id),
-        supabase.from("settings").delete().eq("household_id", profile.household_id),
+        supabase.from("expenses").delete().eq("household_id", householdId),
+        supabase.from("assets").delete().eq("household_id", householdId),
+        supabase.from("categories").delete().eq("household_id", householdId),
+        supabase.from("settings").delete().eq("household_id", householdId),
       ]);
     }
     setExpenses([]);
@@ -1941,9 +2484,13 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
     setCustomCurrencies([]);
     setExpenseCategoryOverrides({});
     setIncomeCategoryOverrides({});
+    setPaymentMethodOverrides({});
+    setDestinationAccountOverrides({});
     setRecurringIncomeSkips({});
     setDeletedBuiltinExpenseCategoryIds(new Set());
     setDeletedBuiltinIncomeSourceIds(new Set());
+    setDeletedBuiltinPaymentMethodIds(new Set());
+    setDeletedBuiltinDestinationAccountIds(new Set());
     setExpenseCategoryOrder([]);
     setIncomeCategoryOrder([]);
     setQuickAccessCountState(8);
@@ -1957,7 +2504,7 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
       /* ignore */
     }
     removeExpandyAppDataKeys();
-  }, [profile?.household_id]);
+  }, [householdId]);
 
   const value = useMemo(
     () => ({
@@ -1967,7 +2514,11 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
       materializeRecurringForMonth,
       addExpense,
       importData,
+      bulkImportIncomes,
+      bulkImportExpenses,
       updateExpense,
+      updateExpenseAsync,
+      waitForCloudContext,
       removeExpense,
       expenseCategories,
       incomeSources,
@@ -2004,7 +2555,11 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
       materializeRecurringForMonth,
       addExpense,
       importData,
+      bulkImportIncomes,
+      bulkImportExpenses,
       updateExpense,
+      updateExpenseAsync,
+      waitForCloudContext,
       removeExpense,
       expenseCategories,
       incomeSources,

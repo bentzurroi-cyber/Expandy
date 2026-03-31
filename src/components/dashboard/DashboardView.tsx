@@ -1,5 +1,11 @@
-import { useEffect, useMemo, useState } from "react";
-import { AlertCircle, BarChart3, PieChart as PieChartIcon } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  AlertCircle,
+  BarChart3,
+  PieChart as PieChartIcon,
+  TrendingDown,
+  TrendingUp,
+} from "lucide-react";
 import {
   Bar,
   BarChart,
@@ -39,6 +45,12 @@ import { useI18n } from "@/context/I18nContext";
 import type { Expense } from "@/data/mock";
 import { overBudgetStripeStyle } from "@/lib/budgetStripe";
 import { convertToILS } from "@/lib/fx";
+import {
+  localizedDestinationAccountName,
+  localizedExpenseCategoryName,
+  localizedIncomeSourceName,
+  localizedPaymentMethodName,
+} from "@/lib/defaultEntityLabels";
 import { resolveTransactionCategory } from "@/lib/transactionCategoryDisplay";
 import { formatCurrencyCompact, formatDateDDMMYYYY, formatIls } from "@/lib/format";
 import {
@@ -75,6 +87,12 @@ const INCOME_PIE_COLORS = [
   "#ef4444", // red
 ] as const;
 
+/** Bar fills — aligned with legend pills; a step brighter than the first muted pass. */
+const TREND_BAR_FILL = {
+  expense: "#d85555",
+  income: "#1faa59",
+} as const;
+
 export type DashboardViewProps = {
   onEditExpense: (e: Expense) => void;
   onCategoryDrillDown: (categoryId: string, month: YearMonth) => void;
@@ -85,8 +103,8 @@ export function DashboardView({
   onCategoryDrillDown,
 }: DashboardViewProps) {
   const fxTick = useFxTick();
-  const { t, dir } = useI18n();
-  const { getBudget, budgets } = useBudgets();
+  const { t, dir, lang } = useI18n();
+  const { getBudget, getMonthlyBudgetTotal, budgets } = useBudgets();
   const {
     expenses,
     expensesForMonth,
@@ -106,6 +124,16 @@ export function DashboardView({
   const [selectedYear, setSelectedYear] = useState<string>(() => String(new Date().getFullYear()));
   const [showAllCategoryGrids, setShowAllCategoryGrids] = useState(false);
   const [recentVisibleCount, setRecentVisibleCount] = useState(5);
+
+  const toggleCategoryGridExpanded = useCallback(() => {
+    const y = window.scrollY;
+    setShowAllCategoryGrids((v) => !v);
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        window.scrollTo(0, y);
+      });
+    });
+  }, []);
 
   const filteredExpenses = useMemo(() => {
     if (timeframeMode === "all") return expenses;
@@ -150,7 +178,7 @@ export function DashboardView({
       const over = budget > 0 && spent > budget;
       return {
         categoryId: cat.id,
-        name: cat.name,
+        name: localizedExpenseCategoryName(cat.id, cat.name, lang),
         iconKey: cat.iconKey,
         color: cat.color,
         spent,
@@ -168,7 +196,7 @@ export function DashboardView({
         iconKey: r.iconKey,
       }));
     return { total: sum, rows: list, pieData: pie };
-  }, [expensesOnly, getBudget, budgets, expenseCategories, fxTick, budgetScaleMonths]);
+  }, [expensesOnly, getBudget, budgets, expenseCategories, fxTick, budgetScaleMonths, lang]);
 
   const financeSummary = useMemo(() => {
     const income = incomesOnly.reduce(
@@ -183,6 +211,9 @@ export function DashboardView({
   }, [incomesOnly, expensesOnly, fxTick]);
   const normalizedNet = Math.abs(financeSummary.net) < 0.01 ? 0 : financeSummary.net;
   const netIsZero = Math.abs(normalizedNet) < 0.01;
+  const monthlyBudgetTotal = getMonthlyBudgetTotal() * budgetScaleMonths;
+  const monthlyBudgetRemaining = Math.max(0, monthlyBudgetTotal - financeSummary.expense);
+  const monthlyBudgetOver = monthlyBudgetTotal > 0 && financeSummary.expense > monthlyBudgetTotal;
 
   /** Same order as Entry / Settings: `rows` follows `expenseCategories` from context. */
   const categoryGridRowsVisible = useMemo(
@@ -233,14 +264,14 @@ export function DashboardView({
       );
       rows.push({
         categoryId: catId,
-        name: cat?.name ?? catId,
+        name: localizedIncomeSourceName(catId, cat?.name ?? catId, lang),
         iconKey: cat?.iconKey ?? "tag",
         value,
         fill: INCOME_PIE_COLORS[colorIdx++ % INCOME_PIE_COLORS.length],
       });
     }
     return rows;
-  }, [incomesOnly, incomeSources, expenseCategories, fxTick]);
+  }, [incomesOnly, incomeSources, expenseCategories, fxTick, lang]);
 
   const maxSpend = useMemo(
     () => rows.reduce((m, r) => Math.max(m, r.spent), 0),
@@ -288,12 +319,12 @@ export function DashboardView({
         <CardContent className="space-y-6">
           <div className="space-y-2">
             <Label htmlFor="month-filter">{t.monthFilterLabel}</Label>
-            <div className="flex flex-wrap gap-2">
+            <div className="flex flex-row flex-nowrap items-center gap-2 overflow-x-auto">
               <Select
                 value={timeframeMode}
                 onValueChange={(v) => setTimeframeMode(v as "month" | "year" | "all")}
               >
-                <SelectTrigger className="min-h-11 w-[10rem]">
+                <SelectTrigger className="min-h-11 w-[10rem] shrink-0">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent position="popper">
@@ -316,11 +347,12 @@ export function DashboardView({
                   label={t.monthFilterLabel}
                   allTimeLabel={t.exportAllTime}
                   dir={dir}
+                  triggerClassName="w-auto min-w-[9.5rem] max-w-[12.5rem] shrink-0"
                 />
               ) : null}
               {timeframeMode === "year" ? (
                 <Select value={selectedYear} onValueChange={setSelectedYear}>
-                  <SelectTrigger className="min-h-11 w-[8rem]">
+                  <SelectTrigger className="min-h-11 w-[8rem] shrink-0">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent position="popper">
@@ -359,6 +391,60 @@ export function DashboardView({
               isZero={netIsZero}
               prefix={normalizedNet === 0 ? "" : normalizedNet > 0 ? "+" : "-"}
             />
+          </div>
+          <div
+            className={cn(
+              "rounded-lg border px-3 py-2",
+              monthlyBudgetOver
+                ? "border-red-500/35 bg-red-500/5"
+                : monthlyBudgetTotal > 0
+                  ? "border-emerald-500/30 bg-emerald-500/5"
+                  : "border-border/70 bg-card/20",
+            )}
+          >
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-xs leading-relaxed text-muted-foreground">
+                {lang === "he" ? "תקציב חודשי כולל" : "Monthly total budget"}
+              </p>
+              <span
+                className={cn(
+                  "size-2 rounded-full",
+                  monthlyBudgetTotal <= 0
+                    ? "bg-muted-foreground/50"
+                    : monthlyBudgetOver
+                      ? "bg-red-500"
+                      : "bg-emerald-500",
+                )}
+                aria-hidden
+              />
+            </div>
+            {monthlyBudgetTotal > 0 ? (
+              <>
+                <p
+                  className={cn(
+                    "text-sm font-medium tabular-nums leading-relaxed",
+                    monthlyBudgetOver ? "text-red-400" : "text-emerald-400",
+                  )}
+                >
+                  {monthlyBudgetOver
+                    ? lang === "he"
+                      ? `אין יתרה • חריגה ${formatIls(financeSummary.expense - monthlyBudgetTotal)}`
+                      : `No remaining • over ${formatIls(financeSummary.expense - monthlyBudgetTotal)}`
+                    : lang === "he"
+                      ? `נותר ${formatIls(monthlyBudgetRemaining)}`
+                      : `${formatIls(monthlyBudgetRemaining)} remaining`}
+                </p>
+                <p className="text-xs tabular-nums leading-relaxed text-muted-foreground">
+                  {lang === "he"
+                    ? `${formatIls(financeSummary.expense)} / ${formatIls(monthlyBudgetTotal)}`
+                    : `${formatIls(financeSummary.expense)} / ${formatIls(monthlyBudgetTotal)}`}
+                </p>
+              </>
+            ) : (
+              <p className="text-sm leading-relaxed text-muted-foreground">
+                {lang === "he" ? "לא הוגדר תקציב חודשי כולל" : "No monthly total budget set"}
+              </p>
+            )}
           </div>
 
           <div className="space-y-2" role="group" aria-label={t.chartToggleHint}>
@@ -521,7 +607,7 @@ export function DashboardView({
                   variant="ghost"
                   size="sm"
                   className="w-full text-sm leading-relaxed text-muted-foreground"
-                  onClick={() => setShowAllCategoryGrids((v) => !v)}
+                  onClick={toggleCategoryGridExpanded}
                 >
                   {showAllCategoryGrids
                     ? t.dashboardRecentShowLess
@@ -618,7 +704,7 @@ export function DashboardView({
                 variant="ghost"
                 size="sm"
                 className="w-full text-sm leading-relaxed text-muted-foreground"
-                onClick={() => setShowAllCategoryGrids((v) => !v)}
+                onClick={toggleCategoryGridExpanded}
               >
                 {showAllCategoryGrids
                   ? t.dashboardRecentShowLess
@@ -761,12 +847,19 @@ export function DashboardView({
                             <span className="flex items-center gap-1.5 font-medium text-foreground">
                               <CategoryGlyph iconKey={cat.iconKey} className="size-3.5" />
                               <ColorBadge color={cat.color} />
-                              <span className="leading-relaxed">{cat.name}</span>
+                              <span className="leading-relaxed">
+                                {e.type === "income"
+                                  ? localizedIncomeSourceName(cat.id, cat.name, lang)
+                                  : localizedExpenseCategoryName(cat.id, cat.name, lang)}
+                              </span>
                             </span>
                           ) : null}
                           {pm ? (
                             <span className="text-muted-foreground/80">
-                              · {pm.name}
+                              ·{" "}
+                              {e.type === "income"
+                                ? localizedDestinationAccountName(pm.id, pm.name, lang)
+                                : localizedPaymentMethodName(pm.id, pm.name, lang)}
                             </span>
                           ) : null}
                         </div>
@@ -852,27 +945,42 @@ export function DashboardView({
                         return (
                           <div className="flex flex-col gap-2 rounded-md border border-border bg-popover px-3 py-2 text-base leading-relaxed shadow-md" dir={dir}>
                             {ym ? <p className="text-sm leading-relaxed text-muted-foreground">{hebrewMonthYearLabel(ym)}</p> : null}
-                            <div className="inline-flex items-center gap-1 rounded-md border border-green-500/40 bg-green-500/10 px-2 py-1 tabular-nums">
-                              <span className="size-2 rounded-full bg-green-500" /> הכנסות: {formatIls(income)}
+                            <div className="inline-flex items-center gap-1 rounded-md border border-emerald-700/45 bg-emerald-800/[0.18] px-2 py-1 tabular-nums text-foreground">
+                              <span
+                                className="size-2 shrink-0 rounded-full"
+                                style={{ backgroundColor: TREND_BAR_FILL.income }}
+                              />
+                              הכנסות: {formatIls(income)}
                             </div>
-                            <div className="inline-flex items-center gap-1 rounded-md border border-red-500/40 bg-red-500/10 px-2 py-1 tabular-nums">
-                              <span className="size-2 rounded-full bg-red-500" /> הוצאות: {formatIls(expense)}
+                            <div className="inline-flex items-center gap-1 rounded-md border border-red-800/45 bg-red-950/[0.22] px-2 py-1 tabular-nums text-foreground">
+                              <span
+                                className="size-2 shrink-0 rounded-full"
+                                style={{ backgroundColor: TREND_BAR_FILL.expense }}
+                              />
+                              הוצאות: {formatIls(expense)}
                             </div>
                           </div>
                         );
                       }}
                     />
-                    <Legend />
+                    <Legend
+                      verticalAlign="bottom"
+                      align="center"
+                      wrapperStyle={{ paddingTop: 4 }}
+                      content={(legendProps) => (
+                        <TrendBarChartLegend payload={legendProps.payload} dir={dir} />
+                      )}
+                    />
                     <Bar
                       dataKey="expense"
                       name={t.summaryExpense}
-                      fill="#ef4444"
+                      fill={TREND_BAR_FILL.expense}
                       radius={[6, 6, 0, 0]}
                     />
                     <Bar
                       dataKey="income"
                       name={t.summaryIncome}
-                      fill="#22c55e"
+                      fill={TREND_BAR_FILL.income}
                       radius={[6, 6, 0, 0]}
                     />
                   </BarChart>
@@ -880,12 +988,54 @@ export function DashboardView({
               </div>
             </div>
           </div>
-
-          <div className="rounded-lg border border-dashed border-border bg-muted/30 p-4 text-center text-base leading-relaxed text-muted-foreground">
-            {t.dashboardFooterNote}
-          </div>
         </CardContent>
       </Card>
+    </div>
+  );
+}
+
+function TrendBarChartLegend({
+  payload,
+  dir,
+}: {
+  payload?: ReadonlyArray<{
+    value?: string;
+    dataKey?: unknown;
+    color?: string;
+  }>;
+  dir: "rtl" | "ltr";
+}) {
+  if (!payload?.length) return null;
+  return (
+    <div
+      className="flex flex-wrap items-center justify-center gap-2 px-1 pt-1 sm:gap-3"
+      dir={dir}
+    >
+      {payload.map((entry, index) => {
+        const dk = entry.dataKey;
+        const key =
+          dk === "income" || dk === "expense"
+            ? dk
+            : typeof dk === "string" || typeof dk === "number"
+              ? String(dk)
+              : "";
+        const isIncome = key === "income";
+        const Icon = isIncome ? TrendingUp : TrendingDown;
+        return (
+          <div
+            key={key || `legend-${index}`}
+            className={cn(
+              "inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-[0.8125rem] font-medium leading-snug shadow-sm sm:text-sm",
+              isIncome
+                ? "border-emerald-500/45 bg-emerald-500/[0.11] text-emerald-800 dark:border-emerald-400/40 dark:bg-emerald-500/18 dark:text-emerald-100"
+                : "border-red-500/45 bg-red-500/[0.11] text-red-800 dark:border-red-400/40 dark:bg-red-500/18 dark:text-red-100",
+            )}
+          >
+            <Icon className="size-3.5 shrink-0 opacity-95 sm:size-4" aria-hidden />
+            <span>{entry.value}</span>
+          </div>
+        );
+      })}
     </div>
   );
 }

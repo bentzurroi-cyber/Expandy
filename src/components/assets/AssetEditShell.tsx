@@ -39,7 +39,7 @@ type AssetEditShellProps = {
   onOpenChange: (open: boolean) => void;
   month: `${number}-${number}`;
   onMonthChange: (month: `${number}-${number}`) => void;
-  onSave: (id: string, balance: number, currency: string, name: string, color: string) => void;
+  onSave: (id: string, balance: number, currency: string, name: string) => void;
   onDelete: (id: string) => void;
 };
 
@@ -57,14 +57,12 @@ export function AssetEditShell({
   const [balance, setBalance] = useState("");
   const [currency, setCurrency] = useState("ILS");
   const [name, setName] = useState("");
-  const [color, setColor] = useState("#94a3b8");
 
   useEffect(() => {
     if (!asset) return;
     setBalance(formatNumericInput(String(asset.balance)));
     setCurrency(asset.currency ?? "ILS");
     setName(asset.name ?? "");
-    setColor(asset.color ?? "#94a3b8");
   }, [asset]);
 
   if (!asset) return null;
@@ -86,16 +84,6 @@ export function AssetEditShell({
           id="asset-edit-name"
           value={name}
           onChange={(e) => setName(e.target.value)}
-        />
-      </div>
-      <div className="space-y-2">
-        <Label htmlFor="asset-edit-color">{dir === "rtl" ? "צבע" : "Color"}</Label>
-        <Input
-          id="asset-edit-color"
-          type="color"
-          value={color}
-          onChange={(e) => setColor(e.target.value)}
-          className="h-10 w-16 p-1"
         />
       </div>
       <div className="space-y-2">
@@ -145,7 +133,6 @@ export function AssetEditShell({
             Math.round(parsed * 100) / 100,
             currency,
             name.trim() || asset.name,
-            color,
           );
           onOpenChange(false);
         }}

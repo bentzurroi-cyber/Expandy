@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
 import { Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { AssetEditShell } from "@/components/assets/AssetEditShell";
@@ -22,8 +22,9 @@ import { useFxTick } from "@/context/FxContext";
 import { useExpenses } from "@/context/ExpensesContext";
 import { useI18n } from "@/context/I18nContext";
 import { DEFAULT_CURRENCY } from "@/data/mock";
-import { convertToILS } from "@/lib/fx";
-import { formatIls, formatIlsCompact } from "@/lib/format";
+import { convertToILS, prefetchFxRate } from "@/lib/fx";
+import { localizedAssetTypeName } from "@/lib/defaultEntityLabels";
+import { formatCurrencyCompact, formatIls, formatIlsCompact } from "@/lib/format";
 import { formatNumericInput, parseNumericInput } from "@/utils/formatters";
 import {
   formatYearMonth,
@@ -32,6 +33,7 @@ import {
   parseLocalIsoDate,
   type YearMonth,
 } from "@/lib/month";
+import { toast } from "sonner";
 
 const ASSET_TYPE_ACCENTS: Record<string, string> = {
   liquid: "#22c55e",
@@ -39,9 +41,9 @@ const ASSET_TYPE_ACCENTS: Record<string, string> = {
   pension: "#a855f7",
 };
 
-export function AssetsView() {
+export function AssetsView({ isActive = true }: { isActive?: boolean }) {
   const fxTick = useFxTick();
-  const { t, dir } = useI18n();
+  const { t, dir, lang } = useI18n();
   const { currencies } = useExpenses();
   const {
     snapshots,
@@ -55,13 +57,13 @@ export function AssetsView() {
     addSnapshotAccount,
     assetTypes,
     assetNamePresetsFor,
-    registerAssetName,
   } = useAssets();
 
   const [addType, setAddType] = useState<string>("liquid");
   const [addName, setAddName] = useState("");
   const [addBalance, setAddBalance] = useState("");
   const [addCurrency, setAddCurrency] = useState<string>(DEFAULT_CURRENCY);
+  const [addFxPreviewTick, setAddFxPreviewTick] = useState(0);
   const [editingAssetId, setEditingAssetId] = useState<string | null>(null);
   const [balanceEntryMonth, setBalanceEntryMonth] = useState<YearMonth>(() =>
     formatYearMonth(new Date()),
@@ -77,24 +79,73 @@ export function AssetsView() {
   const [rangeEndYm, setRangeEndYm] = useState<YearMonth | "all">("all");
   const [listViewYm, setListViewYm] = useState<YearMonth>(() => formatYearMonth(new Date()));
 
+  const wasActiveRef = useRef(false);
+  useEffect(() => {
+    if (isActive && !wasActiveRef.current) {
+      setAddType("liquid");
+      setAddName("");
+      setAddBalance("");
+      setAddCurrency(DEFAULT_CURRENCY);
+    }
+    wasActiveRef.current = isActive;
+  }, [isActive]);
+
+  const parsedAddBalance = useMemo(() => parseNumericInput(addBalance), [addBalance]);
+  const rateDate = `${balanceEntryMonth}-01`;
+  const addBalanceRounded =
+    typeof parsedAddBalance === "number" && Number.isFinite(parsedAddBalance)
+      ? Math.round(parsedAddBalance * 100) / 100
+      : null;
+  const addIlsPreview =
+    addCurrency !== "ILS" && addBalanceRounded != null
+      ? convertToILS(addBalanceRounded, addCurrency, rateDate)
+      : null;
+
+  useEffect(() => {
+    if (addCurrency === "ILS") return;
+    if (addBalanceRounded == null || addBalanceRounded <= 0) return;
+
+    let cancelled = false;
+    void prefetchFxRate(addCurrency, rateDate).finally(() => {
+      if (!cancelled) setAddFxPreviewTick((t) => t + 1);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [addCurrency, addBalanceRounded, rateDate]);
+
   const namePresets = useMemo(() => assetNamePresetsFor(addType), [assetNamePresetsFor, addType]);
+
+  const accentForAssetType = useCallback(
+    (typeId: string) => {
+      const row = assetTypes.find((x) => x.id === typeId);
+      if (row?.color && /^#[0-9a-fA-F]{6}$/i.test(row.color)) return row.color;
+      return ASSET_TYPE_ACCENTS[typeId] ?? "#94a3b8";
+    },
+    [assetTypes],
+  );
 
   const assetSeries = useMemo(() => {
     const byName = new Map<string, { key: string; name: string; color: string; type: string }>();
-    for (const snap of snapshots) {
-      for (const a of snap.accounts) {
-        const key = a.name.trim().toLowerCase();
-        if (byName.has(key)) continue;
+    for (const snap of snapshots ?? []) {
+      const accounts = Array.isArray(snap?.accounts) ? snap.accounts : [];
+      for (const a of accounts) {
+        if (!a || typeof a !== "object") continue;
+        const rawName = typeof a.name === "string" ? a.name : "";
+        const key = rawName.trim().toLowerCase();
+        if (!key || byName.has(key)) continue;
+        const typ = typeof a.type === "string" ? a.type : "";
         byName.set(key, {
           key,
-          name: a.name,
-          color: a.color ?? ASSET_TYPE_ACCENTS[a.type] ?? "#94a3b8",
-          type: a.type,
+          name: rawName.trim() || "—",
+          color: accentForAssetType(typ),
+          type: typ,
         });
       }
     }
     return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name, "he"));
-  }, [snapshots]);
+  }, [snapshots, accentForAssetType]);
 
   useEffect(() => {
     setAssetChartOn((prev) => {
@@ -112,11 +163,11 @@ export function AssetsView() {
   useEffect(() => {
     setAssetTypeFilterOn((prev) => {
       const next = { ...prev };
-      for (const t of assetTypes) {
-        if (next[t.id] === undefined) next[t.id] = true;
+      for (const typ of assetTypes ?? []) {
+        if (typ?.id && next[typ.id] === undefined) next[typ.id] = true;
       }
       for (const key of Object.keys(next)) {
-        if (!assetTypes.some((t) => t.id === key)) delete next[key];
+        if (!assetTypes?.some((x) => x?.id === key)) delete next[key];
       }
       return next;
     });
@@ -124,7 +175,7 @@ export function AssetsView() {
 
   const monthOptions = useMemo(() => {
     const cur = currentMonth;
-    const from = [...snapshots.map((s) => s.ym as YearMonth)];
+    const from = (snapshots ?? []).map((s) => s?.ym).filter(Boolean) as YearMonth[];
     const uniq = new Set<YearMonth>([cur, ...from]);
     return [...uniq].sort((a, b) => b.localeCompare(a));
   }, [snapshots, currentMonth]);
@@ -136,19 +187,23 @@ export function AssetsView() {
 
   const total = useMemo(
     () =>
-      currentAssets.reduce(
-        (sum, a) => sum + convertToILS(a.balance, a.currency ?? "ILS", `${currentMonth}-01`),
-        0,
-      ),
+      (currentAssets ?? []).reduce((sum, a) => {
+        if (!a || typeof a.balance !== "number" || !Number.isFinite(a.balance)) return sum;
+        return sum + convertToILS(a.balance, a.currency ?? "ILS", `${currentMonth}-01`);
+      }, 0),
     [currentAssets, currentMonth, fxTick],
   );
 
   const currentSorted = useMemo(
     () =>
-      [...currentAssets].sort((a, b) => {
-        const typeCmp = a.type.localeCompare(b.type, "he");
+      [...(currentAssets ?? [])].sort((a, b) => {
+        const ta = typeof a?.type === "string" ? a.type : "";
+        const tb = typeof b?.type === "string" ? b.type : "";
+        const typeCmp = ta.localeCompare(tb, "he");
         if (typeCmp !== 0) return typeCmp;
-        return a.name.localeCompare(b.name, "he");
+        const na = typeof a?.name === "string" ? a.name : "";
+        const nb = typeof b?.name === "string" ? b.name : "";
+        return na.localeCompare(nb, "he");
       }),
     [currentAssets],
   );
@@ -163,12 +218,16 @@ export function AssetsView() {
           const rateDate = `${s.ym}-01`;
           const valuesByAsset: Record<string, number> = {};
           let totalVisible = 0;
-          for (const a of s.accounts) {
-            if (assetTypeFilterOn[a.type] === false) continue;
-            const keyName = a.name.trim().toLowerCase();
-            if (assetChartOn[keyName] === false) continue;
+          const accounts = Array.isArray(s?.accounts) ? s.accounts : [];
+          for (const a of accounts) {
+            if (!a || typeof a !== "object") continue;
+            const typ = typeof a.type === "string" ? a.type : "";
+            if (assetTypeFilterOn[typ] === false) continue;
+            const keyName = (typeof a.name === "string" ? a.name : "").trim().toLowerCase();
+            if (!keyName || assetChartOn[keyName] === false) continue;
             const key = `asset_${keyName}`;
-            const v = convertToILS(a.balance, a.currency ?? "ILS", rateDate);
+            const bal = typeof a.balance === "number" && Number.isFinite(a.balance) ? a.balance : 0;
+            const v = convertToILS(bal, a.currency ?? "ILS", rateDate);
             valuesByAsset[key] = (valuesByAsset[key] ?? 0) + v;
             totalVisible += v;
           }
@@ -183,43 +242,64 @@ export function AssetsView() {
   );
 
   const listViewRows = useMemo(() => {
-    const snap = snapshots.find((s) => s.ym === listViewYm);
-    if (!snap) return [];
+    const snap = snapshots?.find((s) => s?.ym === listViewYm);
+    if (!snap || !Array.isArray(snap.accounts)) return [];
     const date = `${snap.ym}-01`;
     return snap.accounts
-      .filter((a) => assetTypeFilterOn[a.type] !== false)
-      .filter((a) => assetChartOn[a.name.trim().toLowerCase()] !== false)
-      .map((a) => ({
-        key: `${a.id}-${a.name}`,
-        name: a.name,
-        value: convertToILS(a.balance, a.currency ?? "ILS", date),
-        color: a.color ?? ASSET_TYPE_ACCENTS[a.type] ?? "#94a3b8",
-      }))
+      .filter((a) => a != null && typeof a === "object")
+      .filter((a) => assetTypeFilterOn[typeof a.type === "string" ? a.type : ""] !== false)
+      .filter((a) => {
+        const kn = (typeof a.name === "string" ? a.name : "").trim().toLowerCase();
+        return kn ? assetChartOn[kn] !== false : true;
+      })
+      .map((a) => {
+        const typ = typeof a.type === "string" ? a.type : "";
+        const bal = typeof a.balance === "number" && Number.isFinite(a.balance) ? a.balance : 0;
+        const nm = typeof a.name === "string" ? a.name : "—";
+        return {
+          key: `${a.id ?? "x"}-${nm}`,
+          name: nm,
+          value: convertToILS(bal, a.currency ?? "ILS", date),
+          color: accentForAssetType(typ),
+        };
+      })
       .sort((a, b) => b.value - a.value);
-  }, [snapshots, listViewYm, assetTypeFilterOn, assetChartOn, fxTick]);
+  }, [snapshots, listViewYm, assetTypeFilterOn, assetChartOn, fxTick, accentForAssetType]);
 
   const editingAsset = useMemo(
     () => currentAssets.find((a) => a.id === editingAssetId) ?? null,
     [currentAssets, editingAssetId],
   );
 
-  const typeNameById = useMemo(
-    () => new Map(assetTypes.map((t) => [t.id, t.name] as const)),
-    [assetTypes],
-  );
+  const typeNameById = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const typ of assetTypes ?? []) {
+      if (typ?.id && typeof typ.name === "string") m.set(typ.id, typ.name);
+    }
+    return m;
+  }, [assetTypes]);
 
-  function onAddAsset() {
+  async function onAddAsset() {
     const parsed = parseNumericInput(addBalance);
     if (parsed == null || !Number.isFinite(parsed) || parsed < 0) return;
-    const fallbackTypeName = typeNameById.get(addType) ?? t.assetDefaultNameGeneric;
-    const name = addName.trim() || fallbackTypeName;
-    addSnapshotAccount(balanceEntryMonth, {
+    const name = addName.trim();
+    if (!name) {
+      toast.error(t.assetNameRequired);
+      return;
+    }
+    const balanceStored = Math.round(parsed * 100) / 100;
+    const res = await addSnapshotAccount(balanceEntryMonth, {
       type: addType,
       name,
-      balance: Math.round(parsed * 100) / 100,
+      balance: balanceStored,
       currency: addCurrency,
     });
-    registerAssetName(addType, name);
+    if (!res.ok) {
+      toast.error(
+        lang === "he" ? `שמירת נכס נכשלה: ${res.error}` : `Could not save asset: ${res.error}`,
+      );
+      return;
+    }
     setAddName("");
     setAddBalance("");
     setAddCurrency(DEFAULT_CURRENCY);
@@ -259,6 +339,14 @@ export function AssetsView() {
           <CardDescription>{hebrewMonthYearLabel(balanceEntryMonth)}</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
+          <form
+            className="space-y-4"
+            autoComplete="on"
+            onSubmit={(e) => {
+              e.preventDefault();
+              void onAddAsset();
+            }}
+          >
           <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
             <div className="max-w-[14rem]">
               <DatePickerField
@@ -269,20 +357,31 @@ export function AssetsView() {
                   const d = parseLocalIsoDate(iso);
                   if (d) setBalanceEntryMonth(formatYearMonth(d));
                 }}
+                triggerClassName="h-12 min-h-12 rounded-xl border border-input bg-background px-3.5 py-2.5 ps-3"
               />
             </div>
             <div className="space-y-2">
             <Label htmlFor="asset-add-type">{t.assetSnapshotType}</Label>
             <Select value={addType} onValueChange={setAddType}>
-              <SelectTrigger id="asset-add-type" className="w-full">
+              <SelectTrigger id="asset-add-type" className="h-12 min-h-12 w-full px-3.5 py-2.5">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent position="popper">
-                {assetTypes.map((type) => (
-                  <SelectItem key={type.id} value={type.id} textValue={type.name}>
-                    <SelectItemText>{type.name}</SelectItemText>
-                  </SelectItem>
-                ))}
+                {(assetTypes ?? []).map((type) => {
+                  if (!type?.id) return null;
+                  const nm = typeof type.name === "string" ? type.name : "";
+                  return (
+                    <SelectItem
+                      key={type.id}
+                      value={type.id}
+                      textValue={localizedAssetTypeName(type.id, nm, lang)}
+                    >
+                      <SelectItemText>
+                        {localizedAssetTypeName(type.id, nm, lang)}
+                      </SelectItemText>
+                    </SelectItem>
+                  );
+                })}
               </SelectContent>
             </Select>
             </div>
@@ -292,16 +391,12 @@ export function AssetsView() {
             <Label htmlFor="asset-add-name">{t.assetSnapshotName}</Label>
             <Input
               id="asset-add-name"
+              name="asset-display-name"
               value={addName}
               onChange={(e) => setAddName(e.target.value)}
-              placeholder={typeNameById.get(addType) ?? t.assetDefaultNameGeneric}
-              list="asset-name-presets"
+              placeholder={t.assetNamePickPlaceholder}
+              autoComplete="on"
             />
-            <datalist id="asset-name-presets">
-              {namePresets.map((p) => (
-                <option key={p.id} value={p.name} />
-              ))}
-            </datalist>
             <div className="flex flex-wrap gap-2">
               {namePresets.slice(0, 8).map((p) => (
                 <button
@@ -315,21 +410,61 @@ export function AssetsView() {
               ))}
             </div>
           </div>
-          <div className="space-y-2 md:max-w-[16rem]">
-            <Label htmlFor="asset-add-balance">{t.assetSnapshotBalance}</Label>
-            <Input
-              id="asset-add-balance"
-              type="text"
-              inputMode="decimal"
-              dir="ltr"
-              className="tabular-nums"
-              value={addBalance}
-              onChange={(e) => setAddBalance(formatNumericInput(e.target.value))}
-            />
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2 md:max-w-[28rem]">
+            <div className="space-y-2">
+              <Label htmlFor="asset-add-balance">{t.assetSnapshotBalance}</Label>
+              <Input
+                id="asset-add-balance"
+                type="text"
+                inputMode="decimal"
+                dir="ltr"
+                className="tabular-nums"
+                value={addBalance}
+                onChange={(e) => setAddBalance(formatNumericInput(e.target.value))}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="asset-add-balance-ccy">
+                {lang === "he" ? "מטבע הסכום" : "Balance currency"}
+              </Label>
+              <Select value={addCurrency} onValueChange={setAddCurrency}>
+                <SelectTrigger id="asset-add-balance-ccy" className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent position="popper">
+                  {(["ILS", "USD", "EUR"] as const).map((code) => (
+                    <SelectItem key={code} value={code} textValue={code}>
+                      <SelectItemText>{code}</SelectItemText>
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              {addCurrency !== "ILS" && addBalanceRounded != null ? (
+                <div className="space-y-1">
+                  <p className="text-xs leading-relaxed text-muted-foreground">
+                    {formatCurrencyCompact(addBalanceRounded, addCurrency, currencies)}
+                  </p>
+                  <p className="text-xs leading-relaxed text-muted-foreground" aria-live="polite">
+                    {addIlsPreview != null
+                      ? lang === "he"
+                        ? `בשקלים: ${formatIls(addIlsPreview)}`
+                        : `In ILS: ${formatIls(addIlsPreview)}`
+                      : null}
+                  </p>
+                </div>
+              ) : addCurrency !== "ILS" ? (
+                <p className="text-xs leading-relaxed text-muted-foreground">
+                  {lang === "he"
+                    ? "הסכום יומר לשקל לפי שער היום של תאריך הרישום."
+                    : "Amount is converted to ILS using the rate for the entry date."}
+                </p>
+              ) : null}
+            </div>
           </div>
-          <Button type="button" className="w-full" onClick={onAddAsset}>
+          <Button type="submit" className="w-full">
             {t.assetAddButton}
           </Button>
+          </form>
         </CardContent>
       </Card>
 
@@ -341,28 +476,43 @@ export function AssetsView() {
           {currentSorted.length === 0 ? (
             <p className="text-sm text-muted-foreground">{t.historyEmpty}</p>
           ) : (
-            currentSorted.map((a) => (
-              <button
-                key={a.id}
-                type="button"
-                onClick={() => setEditingAssetId(a.id)}
-                    className="flex w-full items-center justify-between rounded-xl border border-border/60 bg-card px-4 py-3 text-start transition-colors hover:bg-accent/40"
-                    style={{
-                      borderColor: `${(a.color ?? ASSET_TYPE_ACCENTS[a.type] ?? "#94a3b8")}55`,
-                      backgroundImage: `linear-gradient(180deg, ${
-                        a.color ?? ASSET_TYPE_ACCENTS[a.type] ?? "#94a3b8"
-                      }12, transparent)`,
-                    }}
-              >
-                <div className="flex min-w-0 flex-col gap-1">
-                  <p className="truncate text-sm font-medium">{a.name}</p>
-                  <p className="text-sm leading-relaxed text-muted-foreground">{typeNameById.get(a.type) ?? a.type}</p>
-                </div>
-                <p className="text-base font-semibold tabular-nums">
-                  {formatIls(convertToILS(a.balance, a.currency ?? "ILS", `${currentMonth}-01`))}
-                </p>
-              </button>
-            ))
+            currentSorted.map((a) => {
+              const aid = typeof a?.id === "string" ? a.id : "";
+              const atype = typeof a?.type === "string" ? a.type : "";
+              const aname = typeof a?.name === "string" ? a.name : "—";
+              const accent = accentForAssetType(atype);
+              const bal =
+                typeof a?.balance === "number" && Number.isFinite(a.balance) ? a.balance : 0;
+              return (
+                <button
+                  key={aid || aname}
+                  type="button"
+                  onClick={() => aid && setEditingAssetId(aid)}
+                  className="flex w-full items-center justify-between rounded-xl border border-border/60 bg-card px-4 py-3 text-start transition-colors hover:bg-accent/40"
+                  style={{
+                    borderColor: `${accent}55`,
+                    backgroundImage: `linear-gradient(180deg, ${accent}12, transparent)`,
+                  }}
+                >
+                  <div className="flex min-w-0 flex-col gap-1">
+                    <p className="truncate text-sm font-medium">{aname}</p>
+                    <p className="text-sm leading-relaxed text-muted-foreground">
+                      {localizedAssetTypeName(atype, typeNameById.get(atype) ?? atype, lang)}
+                    </p>
+                  </div>
+                  <div className="flex flex-col items-end gap-0.5">
+                    <p className="text-base font-semibold tabular-nums">
+                      {formatIls(convertToILS(bal, a?.currency ?? "ILS", `${currentMonth}-01`))}
+                    </p>
+                    {a?.currency && a.currency !== "ILS" ? (
+                      <p className="text-sm leading-relaxed tabular-nums text-muted-foreground">
+                        {formatCurrencyCompact(bal, a.currency, currencies)}
+                      </p>
+                    ) : null}
+                  </div>
+                </button>
+              );
+            })
           )}
         </CardContent>
       </Card>
@@ -373,125 +523,147 @@ export function AssetsView() {
           <CardDescription>{t.assetsTrendSubtitle}</CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
-          <div className="flex items-center justify-between gap-2">
-            <Popover open={filterMenuOpen} onOpenChange={setFilterMenuOpen}>
-              <PopoverTrigger asChild>
-                <Button type="button" variant="outline" size="sm">
-                  סינון
-                </Button>
-              </PopoverTrigger>
-              <PopoverContent className="w-[min(95vw,30rem)] space-y-4 p-4" dir={dir}>
-                <div className="space-y-2">
-                  <p className="text-sm leading-relaxed font-medium text-muted-foreground">{t.assetChartFilterTypes}</p>
-                  <div className="flex flex-wrap gap-2">
-                    {assetTypes.map((typ) => {
-                      const on = assetTypeFilterOn[typ.id] !== false;
-                      return (
-                        <button
-                          key={typ.id}
-                          type="button"
-                          className={cn(
-                            "rounded-full border px-2.5 py-1 text-sm leading-relaxed",
-                            on
-                              ? "border-primary/60 bg-primary/10 text-foreground"
-                              : "border-border/60 bg-muted/30 text-muted-foreground opacity-70",
-                          )}
-                          onClick={() => {
-                            setAssetTypeFilterOn((p) => ({ ...p, [typ.id]: !on }));
-                            setAssetChartOn((prev) => {
-                              const next = { ...prev };
-                              for (const asset of assetSeries) {
-                                if (asset.type === typ.id) next[asset.key] = !on;
+          <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
+            <div className="flex flex-wrap items-center gap-2">
+              <div
+                className="inline-flex rounded-lg border border-border/60 bg-muted/30 p-0.5"
+                role="group"
+                aria-label={t.assetTrendModeGroup}
+              >
+                <button
+                  type="button"
+                  className={cn(
+                    "min-h-9 rounded-md px-3 text-sm font-medium leading-relaxed transition-colors",
+                    assetChartMode === "total"
+                      ? "bg-background text-foreground shadow-sm"
+                      : "text-muted-foreground hover:text-foreground",
+                  )}
+                  aria-pressed={assetChartMode === "total"}
+                  onClick={() => setAssetChartMode("total")}
+                >
+                  {t.totalNetWorth}
+                </button>
+                <button
+                  type="button"
+                  className={cn(
+                    "min-h-9 rounded-md px-3 text-sm font-medium leading-relaxed transition-colors",
+                    assetChartMode === "assets"
+                      ? "bg-background text-foreground shadow-sm"
+                      : "text-muted-foreground hover:text-foreground",
+                  )}
+                  aria-pressed={assetChartMode === "assets"}
+                  onClick={() => setAssetChartMode("assets")}
+                >
+                  {t.assetChartFilterAssets}
+                </button>
+              </div>
+              <Popover open={filterMenuOpen} onOpenChange={setFilterMenuOpen}>
+                <PopoverTrigger asChild>
+                  <Button type="button" variant="outline" size="sm" className="shrink-0">
+                    {t.historyToolbarFilters}
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent className="w-[min(95vw,30rem)] space-y-4 p-4" dir={dir}>
+                  <div className="space-y-2">
+                    <p className="text-sm leading-relaxed font-medium text-muted-foreground">{t.assetChartFilterTypes}</p>
+                    <div className="flex flex-wrap gap-2">
+                      {(assetTypes ?? []).map((typ) => {
+                        if (!typ?.id) return null;
+                        const on = assetTypeFilterOn[typ.id] !== false;
+                        return (
+                          <button
+                            key={typ.id}
+                            type="button"
+                            className={cn(
+                              "rounded-full border px-2.5 py-1 text-sm leading-relaxed",
+                              on
+                                ? "border-primary/60 bg-primary/10 text-foreground"
+                                : "border-border/60 bg-muted/30 text-muted-foreground opacity-70",
+                            )}
+                            onClick={() => {
+                              setAssetTypeFilterOn((p) => ({ ...p, [typ.id]: !on }));
+                              setAssetChartOn((prev) => {
+                                const next = { ...prev };
+                                for (const asset of assetSeries) {
+                                  if (asset.type === typ.id) next[asset.key] = !on;
+                                }
+                                return next;
+                              });
+                            }}
+                          >
+                            {typeof typ.name === "string" ? typ.name : typ.id}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                  <div className="space-y-2">
+                    <p className="text-sm leading-relaxed font-medium text-muted-foreground">{t.assetChartFilterAssets}</p>
+                    <div className="max-h-36 space-y-1 overflow-auto rounded-lg border border-border/60 p-2">
+                      {assetSeries.map((asset) => {
+                        const on = assetChartOn[asset.key] !== false;
+                        return (
+                          <label key={asset.key} className="flex items-center justify-between gap-2 text-sm">
+                            <span className="truncate">{asset.name}</span>
+                            <Switch
+                              checked={on}
+                              onCheckedChange={(v) =>
+                                setAssetChartOn((p) => ({ ...p, [asset.key]: Boolean(v) }))
                               }
-                              return next;
-                            });
-                          }}
-                        >
-                          {typ.name}
-                        </button>
-                      );
-                    })}
+                            />
+                          </label>
+                        );
+                      })}
+                    </div>
                   </div>
-                </div>
-                <div className="space-y-2">
-                  <p className="text-sm leading-relaxed font-medium text-muted-foreground">{t.assetChartFilterAssets}</p>
-                  <div className="max-h-36 space-y-1 overflow-auto rounded-lg border border-border/60 p-2">
-                    {assetSeries.map((asset) => {
-                      const on = assetChartOn[asset.key] !== false;
-                      return (
-                        <label key={asset.key} className="flex items-center justify-between gap-2 text-sm">
-                          <span className="truncate">{asset.name}</span>
-                          <Switch
-                            checked={on}
-                            onCheckedChange={(v) =>
-                              setAssetChartOn((p) => ({ ...p, [asset.key]: Boolean(v) }))
-                            }
-                          />
-                        </label>
-                      );
-                    })}
-                  </div>
-                </div>
-                <div className="grid grid-cols-2 gap-2">
-                  <div className="space-y-1">
-                    <Label htmlFor="asset-range-start">{t.assetChartRangeStart}</Label>
-                    <Select
-                      value={rangeStartYm}
-                      onValueChange={(v) => setRangeStartYm(v as YearMonth | "all")}
-                    >
-                      <SelectTrigger id="asset-range-start" className="w-full">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent position="popper">
-                        <SelectItem value="all" textValue={t.exportAllTime}>
-                          <SelectItemText>{t.exportAllTime}</SelectItemText>
-                        </SelectItem>
-                        {monthOptionsAsc.map((ym) => (
-                          <SelectItem key={`start-${ym}`} value={ym} textValue={hebrewMonthYearLabel(ym)}>
-                            <SelectItemText>{hebrewMonthYearLabel(ym)}</SelectItemText>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div className="space-y-1">
+                      <Label htmlFor="asset-range-start">{t.assetChartRangeStart}</Label>
+                      <Select
+                        value={rangeStartYm}
+                        onValueChange={(v) => setRangeStartYm(v as YearMonth | "all")}
+                      >
+                        <SelectTrigger id="asset-range-start" className="w-full">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent position="popper">
+                          <SelectItem value="all" textValue={t.exportAllTime}>
+                            <SelectItemText>{t.exportAllTime}</SelectItemText>
                           </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  <div className="space-y-1">
-                    <Label htmlFor="asset-range-end">{t.assetChartRangeEnd}</Label>
-                    <Select
-                      value={rangeEndYm}
-                      onValueChange={(v) => setRangeEndYm(v as YearMonth | "all")}
-                    >
-                      <SelectTrigger id="asset-range-end" className="w-full">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent position="popper">
-                        <SelectItem value="all" textValue={t.exportAllTime}>
-                          <SelectItemText>{t.exportAllTime}</SelectItemText>
-                        </SelectItem>
-                        {monthOptions.map((ym) => (
-                          <SelectItem key={`end-${ym}`} value={ym} textValue={hebrewMonthYearLabel(ym)}>
-                            <SelectItemText>{hebrewMonthYearLabel(ym)}</SelectItemText>
+                          {monthOptionsAsc.map((ym) => (
+                            <SelectItem key={`start-${ym}`} value={ym} textValue={hebrewMonthYearLabel(ym)}>
+                              <SelectItemText>{hebrewMonthYearLabel(ym)}</SelectItemText>
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="space-y-1">
+                      <Label htmlFor="asset-range-end">{t.assetChartRangeEnd}</Label>
+                      <Select
+                        value={rangeEndYm}
+                        onValueChange={(v) => setRangeEndYm(v as YearMonth | "all")}
+                      >
+                        <SelectTrigger id="asset-range-end" className="w-full">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent position="popper">
+                          <SelectItem value="all" textValue={t.exportAllTime}>
+                            <SelectItemText>{t.exportAllTime}</SelectItemText>
                           </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
+                          {monthOptions.map((ym) => (
+                            <SelectItem key={`end-${ym}`} value={ym} textValue={hebrewMonthYearLabel(ym)}>
+                              <SelectItemText>{hebrewMonthYearLabel(ym)}</SelectItemText>
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
                   </div>
-                </div>
-              </PopoverContent>
-            </Popover>
-            <label className="inline-flex items-center gap-2 text-sm leading-relaxed text-muted-foreground">
-              <Select value={assetChartMode} onValueChange={(v) => setAssetChartMode(v as "total" | "assets")}>
-                <SelectTrigger className="min-h-10 w-[10rem]">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent position="popper">
-                  <SelectItem value="total" textValue={t.totalNetWorth}>
-                    <SelectItemText>{t.totalNetWorth}</SelectItemText>
-                  </SelectItem>
-                  <SelectItem value="assets" textValue={t.assetChartFilterAssets}>
-                    <SelectItemText>{t.assetChartFilterAssets}</SelectItemText>
-                  </SelectItem>
-                </SelectContent>
-              </Select>
+                </PopoverContent>
+              </Popover>
+            </div>
+            <label className="inline-flex shrink-0 items-center gap-2 text-sm leading-relaxed text-muted-foreground">
               <span>{chartViewMode === "chart" ? t.assetChartView : t.assetListView}</span>
               <Switch
                 checked={chartViewMode === "list"}
@@ -507,7 +679,11 @@ export function AssetsView() {
                   <YAxis
                     tick={{ fontSize: 11 }}
                     width={50}
-                    tickFormatter={(v) => formatIlsCompact(Number(v)).replace("₪", "")}
+                    tickFormatter={(v) => {
+                      const n = Number(v);
+                      if (!Number.isFinite(n)) return "0";
+                      return formatIlsCompact(n).replace("₪", "");
+                    }}
                   />
                   <Tooltip
                     content={({ active, payload }) => {
@@ -609,12 +785,10 @@ export function AssetsView() {
         onOpenChange={(open) => {
           if (!open) setEditingAssetId(null);
         }}
-        onSave={(id, balance, currency, name, color) => {
+        onSave={(id, balance, currency, name) => {
           setBalance(id, balance);
           setAccountCurrency(id, currency);
-          if (name != null || color != null) {
-            updateAccountMeta(id, { name: name ?? undefined, color: color ?? undefined });
-          }
+          updateAccountMeta(id, { name });
         }}
         onDelete={(id) => {
           deleteAccount(id);

@@ -6,21 +6,23 @@ import { MOCK_CATEGORIES, MOCK_INCOME_SOURCES } from "@/data/mock";
  * when the id was removed from the user's list (e.g. deleted default income source).
  */
 export function resolveTransactionCategory(
-  categoryId: string,
-  type: EntryType,
+  categoryId: unknown,
+  type: unknown,
   expenseCategories: Category[],
   incomeSources: Category[],
 ): Category | null {
-  const primary = type === "income" ? incomeSources : expenseCategories;
-  const mockFallback = type === "income" ? MOCK_INCOME_SOURCES : MOCK_CATEGORIES;
-  const cross = type === "income" ? expenseCategories : incomeSources;
+  const id = typeof categoryId === "string" ? categoryId : "";
+  const resolvedType: EntryType = type === "income" ? "income" : "expense";
+  const primary = resolvedType === "income" ? incomeSources : expenseCategories;
+  const mockFallback = resolvedType === "income" ? MOCK_INCOME_SOURCES : MOCK_CATEGORIES;
+  const cross = resolvedType === "income" ? expenseCategories : incomeSources;
 
-  const fromPrimary = primary.find((c) => c.id === categoryId);
+  const fromPrimary = primary.find((c) => c.id === id);
   if (fromPrimary) return fromPrimary;
 
-  const fromMock = mockFallback.find((c) => c.id === categoryId);
+  const fromMock = mockFallback.find((c) => c.id === id);
   if (fromMock) return fromMock;
 
-  const fromCross = cross.find((c) => c.id === categoryId);
+  const fromCross = cross.find((c) => c.id === id);
   return fromCross ?? null;
 }

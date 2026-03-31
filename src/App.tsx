@@ -20,6 +20,11 @@ export default function App() {
   const consumeHistoryPreset = useCallback(() => setHistoryPreset(null), []);
 
   useEffect(() => {
+    document.getElementById("inline-splash")?.remove();
+    document.getElementById("inline-splash-css")?.remove();
+  }, []);
+
+  useEffect(() => {
     if (!loading) {
       setShowRetry(false);
       return;
@@ -77,7 +82,7 @@ export default function App() {
             onEditExpense={setEditing}
           />
         ) : view === "assets" ? (
-          <Assets />
+          <Assets isActive={view === "assets"} />
         ) : (
           <Settings />
         )}

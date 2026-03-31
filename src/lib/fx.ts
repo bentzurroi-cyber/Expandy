@@ -44,6 +44,11 @@ async function fetchFrankfurterRate(
   }
 }
 
+/** Loads the ILS rate for an ISO currency on a given date into the cache (Frankfurter + static fallback). */
+export async function prefetchFxRate(currency: string, date: string): Promise<number> {
+  return resolveRate(currency, normalizeDate(date));
+}
+
 async function resolveRate(currency: string, date: string): Promise<number> {
   if (currency === "ILS") return 1;
   if (!/^[A-Z]{3}$/.test(currency)) {

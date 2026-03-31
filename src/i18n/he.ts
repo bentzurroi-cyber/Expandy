@@ -12,7 +12,7 @@ export const he = {
   themeToLight: "מעבר למצב בהיר",
   themeToDark: "מעבר למצב כהה",
 
-  expenseTitle: "הוצאה חדשה",
+  expenseTitle: "הוספת הוצאה / הכנסה",
   expenseSubtitle: "הזנה מהירה — סכום, קטגוריה, אמצעי תשלום והערות.",
   entryExpense: "הוצאה",
   entryIncome: "הכנסה",
@@ -34,6 +34,14 @@ export const he = {
   note: "הערות",
   notePlaceholder: "הערות לגבי ההוצאה (אופציונלי)",
   dateLabel: "תאריך",
+  receiptAttachmentLabel: "תמונת קבלה (אופציונלי)",
+  receiptChooseFile: "בחירת תמונה",
+  receiptClear: "הסרה",
+  receiptReplace: "החלפת תמונה",
+  receiptRemoveAria: "הסרת קבלה",
+  receiptViewAria: "הצגת תמונת קבלה",
+  receiptDialogTitle: "קבלה",
+  receiptAddCompact: "הוסף קבלה / תמונה",
   addExpense: "שמירת תנועה",
   addCategory: "הוספת קטגוריה חדשה",
   addPaymentMethod: "הוספת אמצעי תשלום",
@@ -57,7 +65,7 @@ export const he = {
   hintSavedMock: "נשמר מקומית (הדגמה). עדיין ללא מסד נתונים.",
 
   dashboardTitle: "לוח בקרה",
-  dashboardSubtitle: "פילוח הוצאות לפי קטגוריה — נתוני הדגמה בשקלים.",
+  dashboardSubtitle: "פילוח הוצאות לפי קטגוריה.",
   monthFilterLabel: "מסגרת זמן",
   thisMonthTotal: "סה״כ לתקופה",
   summaryIncome: "סה״כ הכנסות",
@@ -75,7 +83,6 @@ export const he = {
   chartPie: "תרשים עוגה",
   chartToggleHint: "החלפת תצוגת פילוח",
   pieEmpty: "אין נתונים להצגה",
-  dashboardFooterNote: "גרפים מתקדמים וסנכרון יתווספו עם חיבור ל-Supabase.",
   recentExpenses: "הוצאות אחרונות",
   recentEmpty: "אין הוצאות בחודש שנבחר.",
   deleteExpense: "מחיקת הוצאה",
@@ -83,14 +90,27 @@ export const he = {
   dateInvalid: "נא לבחור תאריך תקין.",
 
   historyTitle: "היסטוריה",
-  historyEmpty: "לא נמצאו הוצאות לפי הסינון.",
+  historyToolbarFilters: "סינון",
+  historyEmpty: "לא נמצאו תנועות לפי הסינון.",
   searchNotes: "חיפוש בהערות",
   searchNotesPlaceholder: "הקלידו מילות חיפוש…",
   allCategories: "כל הקטגוריות",
+  historyFilterPaymentLabel: "אמצעי תשלום · הוצאות",
+  historyFilterDestinationLabel: "חשבון יעד · הכנסות",
+  historyAllPaymentMethods: "כל אמצעי התשלום",
+  historyAllDestinationAccounts: "כל חשבונות היעד",
+  historyGroupIncome: "הכנסות",
+  historyGroupExpense: "הוצאות",
+  historySortLabel: "מיון",
+  historySortNewest: "חדש לישן",
+  historySortOldest: "ישן לחדש",
+  historySortAmountDesc: "סכום: גבוה לנמוך",
+  historySortAmountAsc: "סכום: נמוך לגבוה",
 
-  editExpenseTitle: "עריכת הוצאה",
-  editExpenseSubtitle: "עדכון פרטי ההוצאה או מחיקה.",
+  editExpenseTitle: "עריכת הוצאה / הכנסה",
+  editExpenseSubtitle: "עדכון פרטי התנועה או מחיקה.",
   saveChanges: "שמירה",
+  saveInProgress: "שומר…",
   deleteExpenseFromDrawer: "מחיקה",
 
   trendsTitle: "מגמות חודשיות",
@@ -109,6 +129,7 @@ export const he = {
   assetSnapshotBalance: "יתרה",
   assetSnapshotCurrency: "מטבע",
   assetAddButton: "הוספת נכס",
+  assetNameRequired: "נא להזין שם לנכס.",
   assetDefaultNameLiquid: "נכס נזיל",
   assetDefaultNamePortfolio: "תיק השקעות",
   assetDefaultNamePension: "חיסכון פנסיוני",
@@ -126,6 +147,7 @@ export const he = {
   manageAssetTypesDesc: "הוספה, עריכה ומחיקה של סוגי נכסים.",
   addAssetType: "הוספת סוג נכס",
   assetTypeNameLabel: "שם סוג נכס",
+  assetTypeColorLabel: "צבע (כל הנכסים מסוג זה)",
   deleteAssetType: "מחיקת סוג",
   deleteAssetTypeConfirm: "למחוק את סוג הנכס? נכסים מסוג זה יעברו לברירת מחדל.",
 
@@ -141,6 +163,16 @@ export const he = {
   settingsBudgetsSectionDesc: "הגדרת תקרה חודשית לכל קטגוריה.",
   settingsBudgetLabel: "תקרה חודשית (₪)",
   settingsSaveNote: "השינויים נשמרים אוטומטית.",
+  settingsDefaultPaymentTitle: "אמצעי תשלום ברירת מחדל (הוצאות)",
+  settingsDefaultPaymentDesc:
+    "במשק בית משותף כל משתמש בוחר את האמצעי שמופיע אוטומטית במסך ההזנה — למשל כרטיס האשראי שבו משתמשים הכי הרבה.",
+  settingsDefaultPaymentNone: "ללא (הראשון ברשימה)",
+  settingsDefaultDestinationTitle: "חשבון יעד ברירת מחדל (הכנסות)",
+  settingsDefaultDestinationDesc:
+    "במשק בית משותף כל משתמש בוחר לאן מופיעות ההכנסות החדשות כברירת מחדל במסך ההזנה.",
+  manageMethodsSetAsDefault: "קבע כברירת מחדל",
+  manageMethodsIsDefault: "ברירת מחדל",
+  manageMethodsDefaultSaved: "נשמר כברירת מחדל",
 
   installAppSectionTitle: "התקנה במכשיר",
   installAppSectionDesc:
@@ -151,15 +183,14 @@ export const he = {
   installAppAndroidChromeNote:
     "התקנה בלחיצה אחת זמינה ב־Chrome באנדרואיד (ובדפדפנים נתמכים אחרים). ב־iPhone השתמשו בהנחיות למעלה.",
   installAppInstructionsLead: "הוראות לפי דפדפן:",
-  installAppChromeSectionTitle: "עבור Chrome / אנדרואיד",
-  installAppChromeBullet1:
-    "במסך זה לחצו על «התקן אפליקציה» (מתחת לכפתור ההנחיות).",
+  installAppChromeSectionTitle: "עבור Chrome / אנדרואיד:",
+  installAppChromeBullet1: "1. לחצו על תפריט שלוש הנקודות בראש הדפדפן.",
   installAppChromeBullet2:
-    "אם אין חלונית, פתחו את תפריט הדפדפן (שלוש נקודות) ובחרו «התקן אפליקציה».",
+    "2. בחרו באפשרות 'הוסף למסך הבית' (Add to Home Screen).",
   installAppSafariSectionTitle: "עבור Safari / אייפון (iOS)",
   installAppSafariBullet1:
-    "לחצו על סמל השיתוף (ריבוע עם חץ למעלה) בסרגל הכלים.",
-  installAppSafariBullet2: "גללו מטה ובחרו «הוסף למסך הבית».",
+    "1. לחצו על סמל השיתוף (ריבוע עם חץ למעלה) בסרגל הכלים.",
+  installAppSafariBullet2: "2. גללו מטה ובחרו «הוסף למסך הבית».",
   installAppAlreadyInstalled: "האפליקציה כבר פועלת במצב מסך מלא.",
   installAppDesktopHint:
     "להתקנה במחשב: השתמשו בתפריט הדפדפן (כרום / אדג') ובחרו התקנת אפליקציה או יצירת קיצור.",
@@ -174,8 +205,8 @@ export const he = {
   cancel: "ביטול",
   confirm: "אישור",
   add: "הוספה",
-  addIncome: "הוסף הכנסה",
-  addExpenseCta: "הוסף הוצאה",
+  addIncome: "הוספת הכנסה",
+  addExpenseCta: "הוספת הוצאה",
 
   recurringDeleteTitle: "מחיקת הכנסה קבועה",
   recurringDeleteDesc: "למחוק רק את התשלום הזה, או לעצור את ההכנסה הקבועה לגמרי?",
@@ -191,6 +222,13 @@ export const he = {
   clearAllDataConfirm:
     "למחוק את כל הנתונים באפליקציה? פעולה זו אינה הפיכה.",
   clearAllDataSuccess: "כל הנתונים נמחקו בהצלחה",
+  resetDataDialogTitle: "האם אתה בטוח?",
+  resetDataHouseholdWarningTitle: "משק בית משותף",
+  resetDataHouseholdWarningDesc:
+    "שים לב: פעולה זו תמחק את הנתונים לכלל משתתפי משק הבית. לא ניתן לבטל.",
+  resetDataHouseholdConfirmCta: "מחיקה לכל המשתתפים",
+
+  installAppIosOnlyIntro: "ב־iPhone או ב־iPad, הוסיפו את האפליקציה דרך Safari:",
 
   noBudgetSet: "לא הוגדר תקציב",
   percentOfBudget: "מהתקציב",
@@ -220,6 +258,29 @@ export const he = {
 
   exportCsvDownload: "ייצוא CSV",
 
+  dataManagementTitle: "ייבוא נתונים",
+  dataManagementDesc:
+    "ייבוא נכסים, הוצאות והכנסות מקובץ CSV או Excel. הקובץ נבדק לפני הוספה למסד הנתונים — ובר עריכה.",
+  importAssets: "ייבוא נכסים",
+  importIncomes: "ייבוא הכנסות",
+  importExampleFormat: "דוגמה לפורמט — הורדת תבנית",
+  importReviewTitleAssets: "סקירת ייבוא — נכסים",
+  importReviewTitleIncomes: "סקירת ייבוא — הכנסות",
+  importReadySection: "מוכן לייבוא",
+  importAttentionSection: "דורש התייחסות",
+  importConfirm: "אשר וייבא",
+  importCancel: "ביטול",
+  importRaw: "נתונים גולמיים",
+  importMustFix: "יש לתקן את כל השורות ב״דורש התייחסות״ לפני האישור.",
+  importNoReady: "אין שורות מוכנות לייבוא.",
+  importImporting: "מייבא...",
+  importIssues: "בעיות",
+  importApplyRow: "אישור עריכה לשורה",
+  importEditRow: "עריכה",
+  importSuccessAssets: "הייבוא הושלם — נוספו {{count}} רשומות נכסים.",
+  importSuccessIncomes: "הייבוא הושלם — נוספו {{count}} רשומות הכנסה.",
+  importParseError: "לא הצלחנו לקרוא את הקובץ. נסו פורמט CSV או Excel.",
+
   assetBalanceEntryMonth: "תאריך לרישום היתרה",
   assetChartFilterTypes: "כלול בגרף",
   assetChartFilterAssets: "נכסים ספציפיים",
@@ -228,6 +289,7 @@ export const he = {
   assetChartRangeEnd: "עד תאריך",
   assetChartView: "תצוגת גרף",
   assetListView: "תצוגת רשימה",
+  assetTrendModeGroup: "סך כל הנכסים מול נכסים ספציפיים",
 
   verifiedAriaVerified: "מאומת — לחץ לביטול אימות",
   verifiedAriaUnverified: "לא מאומת — לחץ לאימות",

@@ -19,12 +19,15 @@ import { formatYearMonth, type YearMonth } from "@/lib/month";
 import { useAuth } from "@/context/AuthContext";
 import { supabase } from "@/lib/supabase";
 import { isValidHouseholdCode, normalizeHouseholdCode } from "@/lib/household";
+import { toast } from "sonner";
 
 const STORAGE_DELETED_BUILTIN_ASSET_TYPES = "expandy-deleted-builtin-asset-types-v1";
 
 export type AssetTypeOption = {
   id: string;
   name: string;
+  /** Accent for charts and cards — shared by all assets of this type */
+  color: string;
 };
 
 type AssetsContextValue = {
@@ -34,17 +37,27 @@ type AssetsContextValue = {
   currentAssets: AssetAccount[];
   setBalance: (id: string, balance: number) => void;
   setAccountCurrency: (id: string, currency: string) => void;
-  updateAccountMeta: (id: string, patch: { name?: string; color?: string }) => void;
+  updateAccountMeta: (id: string, patch: { name?: string }) => void;
   deleteAccount: (id: string) => void;
   addSnapshotAccount: (
     ym: YearMonth,
     input: Omit<AssetAccount, "id">,
-  ) => void;
+  ) => Promise<{ ok: true } | { ok: false; error: string }>;
+  /** Batch insert asset snapshot rows for given months; persists to Supabase. */
+  bulkImportAssets: (
+    rows: Array<{
+      ym: YearMonth;
+      name: string;
+      type: string;
+      balance: number;
+      currency: string;
+    }>,
+  ) => Promise<{ ok: true; count: number } | { ok: false; error: string }>;
   assetTypes: AssetTypeOption[];
   assetNamePresetsFor: (type: AssetTypeId) => AssetNamePreset[];
   registerAssetName: (type: AssetTypeId, name: string) => string | null;
   addAssetType: (name: string) => string | null;
-  updateAssetType: (id: string, name: string) => void;
+  updateAssetType: (id: string, patch: { name?: string; color?: string }) => void;
   deleteAssetType: (id: string, moveToTypeId?: string) => void;
   /** Clear snapshots, presets, and reset types to built-ins (used with full data clear). */
   clearAllUserData: () => void;
@@ -94,9 +107,9 @@ function findAccountInSnapshot(
 }
 
 const DEFAULT_ASSET_TYPES: AssetTypeOption[] = [
-  { id: "liquid", name: "חשבונות נזילים" },
-  { id: "portfolio", name: "תיקי השקעות" },
-  { id: "pension", name: "פנסיה / השתלמות" },
+  { id: "liquid", name: "חשבונות נזילים", color: "#22c55e" },
+  { id: "portfolio", name: "תיקי השקעות", color: "#3b82f6" },
+  { id: "pension", name: "פנסיה / השתלמות", color: "#a855f7" },
 ];
 
 type PersistCtx = {
@@ -104,8 +117,25 @@ type PersistCtx = {
   userId: string;
 };
 
-async function upsertAssetRow(ctx: PersistCtx | null, ym: YearMonth, acc: AssetAccount) {
-  if (!ctx || !isValidHouseholdCode(ctx.householdId)) return;
+function showSupabaseInsertError(error: unknown) {
+  const msg =
+    error instanceof Error
+      ? error.message
+      : typeof error === "string"
+        ? error
+        : "Database write failed";
+  toast.error(msg);
+}
+
+async function upsertAssetRow(
+  ctx: PersistCtx | null,
+  ym: YearMonth,
+  acc: AssetAccount,
+): Promise<{ error: string } | null> {
+  if (!ctx || !isValidHouseholdCode(ctx.householdId)) {
+    console.error("Missing household_id. Cannot save data.");
+    return { error: "Missing household_id. Cannot save data." };
+  }
   const rowId = rowIdForMonth(acc.id, ym);
   const row = {
     id: rowId,
@@ -115,11 +145,22 @@ async function upsertAssetRow(ctx: PersistCtx | null, ym: YearMonth, acc: AssetA
     type: acc.type,
     balance: acc.balance,
     date: `${ym}-01`,
-    color: acc.color ?? null,
+    color: null,
     currency: acc.currency ?? "ILS",
   };
-  const { error } = await supabase.from("assets").upsert(row, { onConflict: "id" });
-  if (error) console.error("[Assets] upsert failed", error);
+  try {
+    const { error } = await supabase.from("assets").upsert(row, { onConflict: "id" });
+    if (error) {
+      console.error(error);
+      showSupabaseInsertError(error);
+      return { error: error.message };
+    }
+  } catch (error) {
+    console.error(error);
+    showSupabaseInsertError(error);
+    return { error: error instanceof Error ? error.message : "Asset upsert failed" };
+  }
+  return null;
 }
 
 async function deleteAssetRowsFromDb(ctx: PersistCtx | null, accountId: string) {
@@ -138,7 +179,7 @@ async function deleteAssetRowsFromDb(ctx: PersistCtx | null, accountId: string) 
 async function updateAssetMetaInDb(
   ctx: PersistCtx | null,
   accountId: string,
-  patch: { name?: string; color?: string },
+  patch: { name?: string },
 ) {
   if (!ctx || !isValidHouseholdCode(ctx.householdId)) return;
   const base = assetBaseId(accountId);
@@ -153,7 +194,6 @@ async function updateAssetMetaInDb(
   }
   const updates: Record<string, string | null> = {};
   if (typeof patch.name === "string") updates.name = patch.name.trim();
-  if (typeof patch.color === "string") updates.color = patch.color.trim();
   if (!Object.keys(updates).length) return;
   for (const r of data ?? []) {
     const id = String((r as { id?: string }).id ?? "");
@@ -188,7 +228,7 @@ async function updateAssetTypeInDb(
 }
 
 export function AssetsProvider({ children }: { children: ReactNode }) {
-  const { profile, user } = useAuth();
+  const { profile, user, session, loading: authLoading } = useAuth();
   const [snapshots, setSnapshots] = useState<AssetSnapshot[]>([]);
   const [assetTypes, setAssetTypes] = useState<AssetTypeOption[]>(() => [...DEFAULT_ASSET_TYPES]);
   const [deletedBuiltinAssetTypeIds, setDeletedBuiltinAssetTypeIds] =
@@ -209,42 +249,52 @@ export function AssetsProvider({ children }: { children: ReactNode }) {
   }, [profile?.household_id, user?.id]);
 
   const loadAssetsFromSupabase = useCallback(async () => {
+    if (authLoading || !session || !user?.id) {
+      return;
+    }
     const hm = normalizeHouseholdCode(profile?.household_id ?? "");
     if (!isValidHouseholdCode(hm)) {
-      setSnapshots([]);
+      console.log("[Assets] Skipping fetch until household_id is ready", {
+        householdId: hm,
+      });
       return;
     }
-    const { data, error } = await supabase
-      .from("assets")
-      .select("id, name, type, balance, date, color, currency")
-      .eq("household_id", hm);
-    if (error || !data) {
-      if (error) console.error("[Assets] load failed", error);
-      setSnapshots([]);
-      return;
+    try {
+      const { data, error } = await supabase
+        .from("assets")
+        .select("id, name, type, balance, date, color, currency")
+        .eq("household_id", hm);
+      console.log("Fetch Result:", data, "Fetch Error:", error);
+      if (error) {
+        console.error("SELECT ERROR:", error.message);
+        return;
+      }
+      if (!data) return;
+      const byYm = new Map<string, AssetAccount[]>();
+      for (const row of data as Array<Record<string, unknown>>) {
+        const rawDate = String(row.date ?? "");
+        const ym = rawDate.slice(0, 7);
+        if (!/^\d{4}-\d{2}$/.test(ym)) continue;
+        const next: AssetAccount = {
+          id: String(row.id ?? ""),
+          name: String(row.name ?? ""),
+          type: String(row.type ?? ""),
+          balance: Number(row.balance ?? 0),
+          color: typeof row.color === "string" ? row.color : undefined,
+          currency: typeof row.currency === "string" ? row.currency : "ILS",
+        };
+        const bucket = byYm.get(ym) ?? [];
+        bucket.push(next);
+        byYm.set(ym, bucket);
+      }
+      const nextSnapshots = [...byYm.entries()]
+        .map(([ym, accounts]) => ({ ym: ym as YearMonth, accounts }))
+        .sort((a, b) => a.ym.localeCompare(b.ym));
+      setSnapshots(nextSnapshots);
+    } catch (error) {
+      console.error("SELECT ERROR:", error);
     }
-    const byYm = new Map<string, AssetAccount[]>();
-    for (const row of data as Array<Record<string, unknown>>) {
-      const rawDate = String(row.date ?? "");
-      const ym = rawDate.slice(0, 7);
-      if (!/^\d{4}-\d{2}$/.test(ym)) continue;
-      const next: AssetAccount = {
-        id: String(row.id ?? ""),
-        name: String(row.name ?? ""),
-        type: String(row.type ?? ""),
-        balance: Number(row.balance ?? 0),
-        color: typeof row.color === "string" ? row.color : undefined,
-        currency: typeof row.currency === "string" ? row.currency : "ILS",
-      };
-      const bucket = byYm.get(ym) ?? [];
-      bucket.push(next);
-      byYm.set(ym, bucket);
-    }
-    const nextSnapshots = [...byYm.entries()]
-      .map(([ym, accounts]) => ({ ym: ym as YearMonth, accounts }))
-      .sort((a, b) => a.ym.localeCompare(b.ym));
-    setSnapshots(nextSnapshots);
-  }, [profile?.household_id]);
+  }, [authLoading, profile?.household_id, session, user?.id]);
 
   useEffect(() => {
     void loadAssetsFromSupabase();
@@ -252,7 +302,7 @@ export function AssetsProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     const hm = normalizeHouseholdCode(profile?.household_id ?? "");
-    if (!isValidHouseholdCode(hm)) return;
+    if (authLoading || !session || !user?.id || !isValidHouseholdCode(hm)) return;
     const channel = supabase
       .channel(`assets-realtime-${hm}`)
       .on(
@@ -266,7 +316,7 @@ export function AssetsProvider({ children }: { children: ReactNode }) {
     return () => {
       void supabase.removeChannel(channel);
     };
-  }, [profile?.household_id, loadAssetsFromSupabase]);
+  }, [authLoading, loadAssetsFromSupabase, profile?.household_id, session, user?.id]);
 
   useEffect(() => {
     const typeIds = new Set(assetTypes.map((t) => t.id));
@@ -281,7 +331,14 @@ export function AssetsProvider({ children }: { children: ReactNode }) {
         const def = DEFAULT_ASSET_TYPES.find((t) => t.id === bid);
         if (def) byId.set(bid, def);
       }
-      return [...byId.values()];
+      return [...byId.values()].map((t) => {
+        const fallback = DEFAULT_ASSET_TYPES.find((d) => d.id === t.id);
+        const color =
+          typeof t.color === "string" && /^#[0-9a-fA-F]{6}$/.test(t.color.trim())
+            ? t.color.trim()
+            : (fallback?.color ?? "#94a3b8");
+        return { ...t, color };
+      });
     });
   }, [assetTypes, deletedBuiltinAssetTypeIds]);
 
@@ -306,15 +363,25 @@ export function AssetsProvider({ children }: { children: ReactNode }) {
     let id = normalizeTypeId(n);
     const exists = new Set(assetTypes.map((t) => t.id));
     while (exists.has(id)) id = `${id}-${Math.floor(Math.random() * 10000)}`;
-    setAssetTypes((prev) => [...prev, { id, name: n }]);
+    setAssetTypes((prev) => [...prev, { id, name: n, color: "#94a3b8" }]);
     return id;
   }, [assetTypes]);
 
-  const updateAssetType = useCallback((id: string, name: string) => {
-    const n = name.trim();
-    if (!n) return;
+  const updateAssetType = useCallback((id: string, patch: { name?: string; color?: string }) => {
     setAssetTypes((prev) =>
-      prev.map((t) => (t.id === id ? { ...t, name: n } : t)),
+      prev.map((t) => {
+        if (t.id !== id) return t;
+        const next = { ...t };
+        if (patch.name !== undefined) {
+          const n = patch.name.trim();
+          if (n) next.name = n;
+        }
+        if (patch.color !== undefined) {
+          const c = patch.color.trim();
+          if (/^#[0-9a-fA-F]{6}$/i.test(c)) next.color = c;
+        }
+        return next;
+      }),
     );
   }, []);
 
@@ -397,7 +464,9 @@ export function AssetsProvider({ children }: { children: ReactNode }) {
           );
         }
         const acc = findAccountInSnapshot(next, currentMonth, id);
-        if (acc) void upsertAssetRow(persistCtx, currentMonth, acc);
+        if (acc) void upsertAssetRow(persistCtx, currentMonth, acc).then((e) => {
+          if (e) console.error("[Assets] persist balance failed", e.error);
+        });
         return next;
       });
     },
@@ -430,7 +499,9 @@ export function AssetsProvider({ children }: { children: ReactNode }) {
           );
         }
         const acc = findAccountInSnapshot(next, currentMonth, id);
-        if (acc) void upsertAssetRow(persistCtx, currentMonth, acc);
+        if (acc) void upsertAssetRow(persistCtx, currentMonth, acc).then((e) => {
+          if (e) console.error("[Assets] persist currency failed", e.error);
+        });
         return next;
       });
     },
@@ -438,9 +509,8 @@ export function AssetsProvider({ children }: { children: ReactNode }) {
   );
 
   const updateAccountMeta = useCallback(
-    (id: string, patch: { name?: string; color?: string }) => {
+    (id: string, patch: { name?: string }) => {
       const nextName = typeof patch.name === "string" ? patch.name.trim() : undefined;
-      const nextColor = typeof patch.color === "string" ? patch.color.trim() : undefined;
       setSnapshots((prev) =>
         prev.map((s) => ({
           ...s,
@@ -450,12 +520,11 @@ export function AssetsProvider({ children }: { children: ReactNode }) {
             return {
               ...a,
               name: nextName ?? a.name,
-              color: nextColor ?? a.color,
             };
           }),
         })),
       );
-      void updateAssetMetaInDb(persistCtx, id, { name: nextName, color: nextColor });
+      void updateAssetMetaInDb(persistCtx, id, { name: nextName });
     },
     [persistCtx],
   );
@@ -491,7 +560,11 @@ export function AssetsProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const addSnapshotAccount = useCallback(
-    (ym: YearMonth, input: Omit<AssetAccount, "id">) => {
+    async (ym: YearMonth, input: Omit<AssetAccount, "id">) => {
+      if (!persistCtx || !isValidHouseholdCode(persistCtx.householdId)) {
+        console.error("Missing household_id. Cannot save data.");
+        return { ok: false as const, error: "אין חיבור לענן. נסה שוב בעוד רגע." };
+      }
       const base = newId();
       const id = `${base}__${ym}`;
       const bal = Math.max(0, Math.round(input.balance * 100) / 100);
@@ -511,8 +584,121 @@ export function AssetsProvider({ children }: { children: ReactNode }) {
           i === idx ? { ...s, accounts: [...s.accounts, row] } : s,
         );
       });
+      const persistErr = await upsertAssetRow(persistCtx, ym, row);
+      if (persistErr) {
+        setSnapshots((prev) =>
+          prev.map((s) => ({
+            ...s,
+            accounts: s.accounts.filter((a) => a.id !== row.id),
+          })),
+        );
+        return { ok: false as const, error: persistErr.error };
+      }
       registerAssetName(row.type, row.name);
-      void upsertAssetRow(persistCtx, ym, row);
+      return { ok: true as const };
+    },
+    [persistCtx, registerAssetName],
+  );
+
+  const bulkImportAssets = useCallback(
+    async (
+      rows: Array<{
+        ym: YearMonth;
+        name: string;
+        type: string;
+        balance: number;
+        currency: string;
+      }>,
+    ) => {
+      try {
+        if (!rows.length) return { ok: true as const, count: 0 };
+        if (!persistCtx) {
+        console.error("Missing household_id. Cannot save data.");
+          return { ok: false as const, error: "אין חיבור לענן. נסה שוב בעוד רגע." };
+        }
+        const ctx = persistCtx;
+        const inserts: Array<{ ym: YearMonth; account: AssetAccount }> = [];
+        const dbRows: Array<Record<string, unknown>> = [];
+        for (const r of rows) {
+          const base = newId();
+          const id = `${base}__${r.ym}`;
+          const bal = Math.max(0, Math.round(r.balance * 100) / 100);
+          const account: AssetAccount = {
+            id,
+            name: r.name.trim(),
+            type: r.type,
+            balance: bal,
+            currency: (r.currency || "ILS").trim(),
+          };
+          inserts.push({ ym: r.ym, account });
+          dbRows.push({
+            id,
+            user_id: ctx.userId,
+            household_id: ctx.householdId,
+            name: account.name,
+            type: account.type,
+            balance: account.balance,
+            date: `${r.ym}-01`,
+            color: null,
+            currency: account.currency,
+          });
+        }
+        const optimisticIds = new Set(inserts.map((x) => x.account.id));
+        setSnapshots((prev) => {
+          const byYm = new Map<YearMonth, AssetAccount[]>();
+          for (const s of prev) {
+            byYm.set(s.ym, [...s.accounts]);
+          }
+          for (const { ym, account } of inserts) {
+            const list = byYm.get(ym) ?? [];
+            list.push(account);
+            byYm.set(ym, list);
+          }
+          return [...byYm.entries()]
+            .map(([ym, accounts]) => ({ ym, accounts }))
+            .sort((a, b) => a.ym.localeCompare(b.ym));
+        });
+        try {
+          const { error } = await supabase.from("assets").insert(dbRows);
+          if (error) {
+            console.error(error);
+            showSupabaseInsertError(error);
+            setSnapshots((prev) =>
+              prev.map((s) => ({
+                ...s,
+                accounts: s.accounts.filter((a) => !optimisticIds.has(a.id)),
+              })),
+            );
+            return { ok: false as const, error: error.message };
+          }
+        } catch (error) {
+          console.error(error);
+          showSupabaseInsertError(error);
+          setSnapshots((prev) =>
+            prev.map((s) => ({
+              ...s,
+              accounts: s.accounts.filter((a) => !optimisticIds.has(a.id)),
+            })),
+          );
+          return {
+            ok: false as const,
+            error: error instanceof Error ? error.message : "Asset import failed",
+          };
+        }
+        for (const { account } of inserts) {
+          registerAssetName(account.type as AssetTypeId, account.name);
+        }
+        return { ok: true as const, count: inserts.length };
+      } catch (err) {
+        console.error("[Assets] bulkImportAssets crashed", err);
+        return {
+          ok: false as const,
+          error:
+            err instanceof Error
+              ? err.message
+              : "ייבוא נכסים נכשל בשל שגיאה לא צפויה.",
+        };
+      }
     },
     [persistCtx, registerAssetName],
   );
@@ -528,6 +714,7 @@ export function AssetsProvider({ children }: { children: ReactNode }) {
       updateAccountMeta,
       deleteAccount,
       addSnapshotAccount,
+      bulkImportAssets,
       assetTypes,
       assetNamePresetsFor,
       registerAssetName,
@@ -545,6 +732,7 @@ export function AssetsProvider({ children }: { children: ReactNode }) {
       updateAccountMeta,
       deleteAccount,
       addSnapshotAccount,
+      bulkImportAssets,
       assetTypes,
       assetNamePresetsFor,
       registerAssetName,

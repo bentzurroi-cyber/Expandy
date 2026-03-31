@@ -1,5 +1,5 @@
-import { useLayoutEffect, useMemo, useState, useEffect } from "react";
-import { Check, ChevronLeft, ChevronRight, RefreshCw } from "lucide-react";
+import { useLayoutEffect, useMemo, useState, useEffect, useRef } from "react";
+import { Check, ChevronLeft, ChevronRight, Image as ImageIcon, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { MonthYearPicker } from "@/components/common/MonthYearPicker";
 import { Input } from "@/components/ui/input";
@@ -24,14 +24,52 @@ import { convertToILS } from "@/lib/fx";
 import { formatCurrencyCompact, formatDateDDMMYYYY, formatIls } from "@/lib/format";
 import { resolveTransactionCategory } from "@/lib/transactionCategoryDisplay";
 import {
+  localizedDestinationAccountName,
+  localizedExpenseCategoryName,
+  localizedIncomeSourceName,
+  localizedPaymentMethodName,
+} from "@/lib/defaultEntityLabels";
+import {
   formatYearMonth,
   type YearMonth,
 } from "@/lib/month";
+import { capReceiptUrls } from "@/lib/receiptConstants";
 import { cn } from "@/lib/utils";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 
 const CATEGORY_ALL = "__all__";
 const EXPENSE_CATEGORY_PREFIX = "exp:";
 const INCOME_CATEGORY_PREFIX = "inc:";
+const METHOD_FILTER_ALL = "__method_all__";
+const DEST_FILTER_ALL = "__dest_all__";
+
+/** Older / partial rows may omit `type` or `receiptUrls`; keep History rendering safe. */
+function normalizeHistoryEntryType(e: Pick<Expense, "type"> | null | undefined): "expense" | "income" {
+  return e?.type === "income" ? "income" : "expense";
+}
+
+function safeHistoryReceiptUrls(e: Expense | null | undefined): string[] {
+  const raw = e?.receiptUrls;
+  if (!Array.isArray(raw)) return [];
+  return capReceiptUrls(raw);
+}
+
+function safeHistoryInstallments(e: Expense): { installments: number; installmentIndex: number } {
+  const installmentsRaw = e?.installments;
+  const idxRaw = e?.installmentIndex;
+  const installments =
+    typeof installmentsRaw === "number" && Number.isFinite(installmentsRaw)
+      ? Math.max(1, Math.floor(installmentsRaw))
+      : 1;
+  const installmentIndex =
+    typeof idxRaw === "number" && Number.isFinite(idxRaw) ? Math.max(1, Math.floor(idxRaw)) : 1;
+  return { installments, installmentIndex };
+}
 
 function clampDayForMonth(year: number, month1to12: number, day: number): number {
   const last = new Date(year, month1to12, 0).getDate();
@@ -55,12 +93,14 @@ export function HistoryView({
   onEditExpense,
 }: HistoryViewProps) {
   useFxTick();
-  const { t, dir } = useI18n();
+  const { t, dir, lang } = useI18n();
   const {
     expenses,
     sortExpenses,
     expenseCategories,
     incomeSources,
+    paymentMethods,
+    destinationAccounts,
     currencies,
     updateExpense,
   } = useExpenses();
@@ -69,12 +109,19 @@ export function HistoryView({
     formatYearMonth(new Date()),
   );
   const [categoryFilter, setCategoryFilter] = useState<string>(CATEGORY_ALL);
+  const [paymentMethodFilter, setPaymentMethodFilter] = useState<string>(METHOD_FILTER_ALL);
+  const [destinationFilter, setDestinationFilter] = useState<string>(DEST_FILTER_ALL);
   const [search, setSearch] = useState("");
   const [rowsPerPage, setRowsPerPage] = useState<10 | 20 | 50 | "all">(10);
   const [page, setPage] = useState(0);
   const [sortBy, setSortBy] = useState<"newest" | "oldest" | "amountDesc" | "amountAsc">(
     "newest",
   );
+  const [receiptGallery, setReceiptGallery] = useState<{
+    urls: string[];
+    index: number;
+  } | null>(null);
+  const receiptSwipeStartX = useRef<number | null>(null);
 
   useLayoutEffect(() => {
     if (!preset) return;
@@ -82,6 +129,24 @@ export function HistoryView({
     setCategoryFilter(`${EXPENSE_CATEGORY_PREFIX}${preset.categoryId}`);
     onPresetConsumed();
   }, [preset, onPresetConsumed]);
+
+  useEffect(() => {
+    if (
+      paymentMethodFilter !== METHOD_FILTER_ALL &&
+      !paymentMethods.some((m) => m.id === paymentMethodFilter)
+    ) {
+      setPaymentMethodFilter(METHOD_FILTER_ALL);
+    }
+  }, [paymentMethodFilter, paymentMethods]);
+
+  useEffect(() => {
+    if (
+      destinationFilter !== DEST_FILTER_ALL &&
+      !destinationAccounts.some((m) => m.id === destinationFilter)
+    ) {
+      setDestinationFilter(DEST_FILTER_ALL);
+    }
+  }, [destinationFilter, destinationAccounts]);
 
   const projectedExpenses = useMemo(() => {
     const valid = expenses.filter(
@@ -105,8 +170,8 @@ export function HistoryView({
         ? [...new Set(valid.map((e) => e.date.slice(0, 7)))]
         : [selectedMonth];
 
-    for (const t of templates) {
-      const baseYm = t.date.slice(0, 7);
+    for (const tmpl of templates) {
+      const baseYm = tmpl.date.slice(0, 7);
       const [by, bm] = baseYm.split("-").map(Number);
       if (!Number.isFinite(by) || !Number.isFinite(bm)) continue;
       const baseDate = new Date(by, bm - 1, 1);
@@ -122,20 +187,21 @@ export function HistoryView({
           (targetDate.getMonth() - viewDate.getMonth());
         if (monthsFromBase < 0) continue;
         if (monthsFromView > 12) continue; // cap projection horizon
-        const id = `${t.id}-installment-${monthsFromBase + 1}`;
+        const id = `${tmpl.id}-installment-${monthsFromBase + 1}`;
         if (ids.has(id)) continue;
-        const srcDay = Number(t.date.slice(8, 10)) || 1;
+        const srcDay = Number(tmpl.date.slice(8, 10)) || 1;
         const safeDay = clampDayForMonth(ty, tm, srcDay);
+        const tmplInst = safeHistoryInstallments(tmpl);
         out.push({
-          ...t,
+          ...tmpl,
           id,
           date: `${ym}-${String(safeDay).padStart(2, "0")}`,
           recurringMonthly: false,
-          installments: Math.max(1, t.installments || 1),
+          installments: Math.max(1, tmplInst.installments),
           installmentIndex: Math.max(1, monthsFromBase + 1),
           note:
-            (typeof t.note === "string" ? t.note.trim() : "") ||
-            `תשלום ${Math.max(1, monthsFromBase + 1)} מתוך ${Math.max(1, t.installments || 1)}`,
+            (typeof tmpl.note === "string" ? tmpl.note.trim() : "") ||
+            `תשלום ${Math.max(1, monthsFromBase + 1)} מתוך ${Math.max(1, tmplInst.installments)}`,
         });
         ids.add(id);
       }
@@ -158,27 +224,48 @@ export function HistoryView({
           typeof e.amount === "number" &&
           Number.isFinite(e.amount),
       )
-      .filter(
-        (e) =>
+      .filter((e) => {
+        const rowType = normalizeHistoryEntryType(e);
+        return (
           categoryFilter === CATEGORY_ALL ||
           (categoryFilter.startsWith(EXPENSE_CATEGORY_PREFIX) &&
-            e.type === "expense" &&
+            rowType === "expense" &&
             e.categoryId === categoryFilter.slice(EXPENSE_CATEGORY_PREFIX.length)) ||
           (categoryFilter.startsWith(INCOME_CATEGORY_PREFIX) &&
-            e.type === "income" &&
-            e.categoryId === categoryFilter.slice(INCOME_CATEGORY_PREFIX.length)),
-      )
+            rowType === "income" &&
+            e.categoryId === categoryFilter.slice(INCOME_CATEGORY_PREFIX.length))
+        );
+      })
+      .filter((e) => {
+        const rowType = normalizeHistoryEntryType(e);
+        if (paymentMethodFilter !== METHOD_FILTER_ALL) {
+          if (rowType === "expense" && e.paymentMethodId !== paymentMethodFilter) {
+            return false;
+          }
+        }
+        if (destinationFilter !== DEST_FILTER_ALL) {
+          if (rowType === "income" && e.paymentMethodId !== destinationFilter) {
+            return false;
+          }
+        }
+        return true;
+      })
       .filter((e) => {
         if (!q) return true;
-        const cat = resolveTransactionCategory(
-          e.categoryId,
-          e.type,
-          expenseCategories,
-          incomeSources,
-        );
-        const catName = (cat?.name ?? "").toLowerCase();
-        const note = typeof e.note === "string" ? e.note : "";
-        return note.toLowerCase().includes(q) || catName.includes(q);
+        try {
+          const cat = resolveTransactionCategory(
+            e.categoryId,
+            normalizeHistoryEntryType(e),
+            expenseCategories,
+            incomeSources,
+          );
+          const catName = (cat?.name ?? "").toLowerCase();
+          const note = typeof e.note === "string" ? e.note : "";
+          return note.toLowerCase().includes(q) || catName.includes(q);
+        } catch {
+          const note = typeof e?.note === "string" ? e.note : "";
+          return note.toLowerCase().includes(q);
+        }
       });
   }, [
     ALL_TIME,
@@ -188,6 +275,8 @@ export function HistoryView({
     search,
     incomeSources,
     expenseCategories,
+    paymentMethodFilter,
+    destinationFilter,
   ]);
 
   const sortedFiltered = useMemo(
@@ -202,7 +291,7 @@ export function HistoryView({
 
   useEffect(() => {
     setPage(0);
-  }, [selectedMonth, categoryFilter, search]);
+  }, [selectedMonth, categoryFilter, paymentMethodFilter, destinationFilter, search]);
 
   useEffect(() => {
     setPage(0);
@@ -227,11 +316,33 @@ export function HistoryView({
   return (
     <div className="flex flex-col gap-3" dir={dir}>
       <h1 className="sr-only">{t.historyTitle}</h1>
-      <div className="-mx-4 border-b border-border/80 bg-background px-4 py-3">
-        <div className="mx-auto grid w-full max-w-lg grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          <div className="space-y-1.5">
-            <Label htmlFor="hist-month">{t.monthFilterLabel}</Label>
-            <div className="mt-2">
+      <div className="-mx-4 border-b border-border/80 bg-gradient-to-b from-muted/25 to-background px-4 py-3">
+        <div className="mx-auto w-full max-w-4xl space-y-3">
+          <div className="flex flex-wrap items-end justify-between gap-x-3 gap-y-1">
+            <h2 className="text-base font-semibold tracking-tight text-foreground">
+              {t.historyTitle}
+            </h2>
+            <span className="text-xs text-muted-foreground">{t.historyToolbarFilters}</span>
+          </div>
+          <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2 lg:grid-cols-3">
+            <div className="space-y-1 sm:col-span-2 lg:col-span-3">
+              <Label htmlFor="hist-search" className="text-xs font-medium text-muted-foreground">
+                {t.searchNotes}
+              </Label>
+              <Input
+                id="hist-search"
+                type="search"
+                placeholder={t.searchNotesPlaceholder}
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                autoComplete="off"
+                className="h-10"
+              />
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="hist-month" className="text-xs font-medium text-muted-foreground">
+                {t.monthFilterLabel}
+              </Label>
               <MonthYearPicker
                 id="hist-month"
                 value={selectedMonth === ALL_TIME ? "all" : selectedMonth}
@@ -242,114 +353,176 @@ export function HistoryView({
                 triggerClassName="h-10 w-full"
               />
             </div>
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="hist-cat">{t.category}</Label>
-            <Select
-              value={categoryFilter}
-              onValueChange={setCategoryFilter}
-            >
-              <SelectTrigger id="hist-cat" className="min-h-11 w-full">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent position="popper">
-                <SelectItem value={CATEGORY_ALL} textValue={t.allCategories}>
-                  <SelectItemText>{t.allCategories}</SelectItemText>
-                </SelectItem>
-                <SelectGroup>
-                  <SelectLabel>הכנסות</SelectLabel>
-                  {incomeSources.map((c) => (
-                    <SelectItem
-                      key={`inc-${c.id}`}
-                      value={`${INCOME_CATEGORY_PREFIX}${c.id}`}
-                      textValue={c.name}
-                    >
-                      <span className="flex items-center gap-2">
-                        <CategoryGlyph iconKey={c.iconKey} className="size-3.5" />
-                        <ColorBadge color={c.color} />
-                        <SelectItemText>{c.name}</SelectItemText>
-                      </span>
-                    </SelectItem>
-                  ))}
-                </SelectGroup>
-                <SelectGroup>
-                  <SelectLabel>הוצאות</SelectLabel>
-                  {expenseCategories.map((c) => (
-                    <SelectItem
-                      key={`exp-${c.id}`}
-                      value={`${EXPENSE_CATEGORY_PREFIX}${c.id}`}
-                      textValue={c.name}
-                    >
-                      <span className="flex items-center gap-2">
-                        <CategoryGlyph iconKey={c.iconKey} className="size-3.5" />
-                        <ColorBadge color={c.color} />
-                        <SelectItemText>{c.name}</SelectItemText>
-                      </span>
-                    </SelectItem>
-                  ))}
-                </SelectGroup>
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="hist-search">{t.searchNotes}</Label>
-            <Input
-              id="hist-search"
-              type="search"
-              placeholder={t.searchNotesPlaceholder}
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              autoComplete="off"
-            />
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="hist-sort">מיון</Label>
-            <Select value={sortBy} onValueChange={(v) => setSortBy(v as typeof sortBy)}>
-              <SelectTrigger id="hist-sort" className="min-h-11 w-full">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent position="popper">
-                <SelectItem value="newest" textValue="חדש לישן">
-                  <SelectItemText>חדש לישן</SelectItemText>
-                </SelectItem>
-                <SelectItem value="oldest" textValue="ישן לחדש">
-                  <SelectItemText>ישן לחדש</SelectItemText>
-                </SelectItem>
-                <SelectItem value="amountDesc" textValue="סכום: גבוה לנמוך">
-                  <SelectItemText>סכום: גבוה לנמוך</SelectItemText>
-                </SelectItem>
-                <SelectItem value="amountAsc" textValue="סכום: נמוך לגבוה">
-                  <SelectItemText>סכום: נמוך לגבוה</SelectItemText>
-                </SelectItem>
-              </SelectContent>
-            </Select>
+            <div className="space-y-1">
+              <Label htmlFor="hist-cat" className="text-xs font-medium text-muted-foreground">
+                {t.category}
+              </Label>
+              <Select value={categoryFilter} onValueChange={setCategoryFilter}>
+                <SelectTrigger id="hist-cat" className="min-h-10 w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent position="popper">
+                  <SelectItem value={CATEGORY_ALL} textValue={t.allCategories}>
+                    <SelectItemText>{t.allCategories}</SelectItemText>
+                  </SelectItem>
+                  <SelectGroup>
+                    <SelectLabel>{t.historyGroupIncome}</SelectLabel>
+                    {incomeSources.map((c) => {
+                      const label = localizedIncomeSourceName(c.id, c.name, lang);
+                      return (
+                        <SelectItem
+                          key={`inc-${c.id}`}
+                          value={`${INCOME_CATEGORY_PREFIX}${c.id}`}
+                          textValue={label}
+                        >
+                          <span className="flex items-center gap-2">
+                            <CategoryGlyph iconKey={c.iconKey} className="size-3.5" />
+                            <ColorBadge color={c.color} />
+                            <SelectItemText>{label}</SelectItemText>
+                          </span>
+                        </SelectItem>
+                      );
+                    })}
+                  </SelectGroup>
+                  <SelectGroup>
+                    <SelectLabel>{t.historyGroupExpense}</SelectLabel>
+                    {expenseCategories.map((c) => {
+                      const label = localizedExpenseCategoryName(c.id, c.name, lang);
+                      return (
+                        <SelectItem
+                          key={`exp-${c.id}`}
+                          value={`${EXPENSE_CATEGORY_PREFIX}${c.id}`}
+                          textValue={label}
+                        >
+                          <span className="flex items-center gap-2">
+                            <CategoryGlyph iconKey={c.iconKey} className="size-3.5" />
+                            <ColorBadge color={c.color} />
+                            <SelectItemText>{label}</SelectItemText>
+                          </span>
+                        </SelectItem>
+                      );
+                    })}
+                  </SelectGroup>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="hist-pay" className="text-xs font-medium text-muted-foreground">
+                {t.historyFilterPaymentLabel}
+              </Label>
+              <Select value={paymentMethodFilter} onValueChange={setPaymentMethodFilter}>
+                <SelectTrigger id="hist-pay" className="min-h-10 w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent position="popper">
+                  <SelectItem value={METHOD_FILTER_ALL} textValue={t.historyAllPaymentMethods}>
+                    <SelectItemText>{t.historyAllPaymentMethods}</SelectItemText>
+                  </SelectItem>
+                  {paymentMethods.map((m) => {
+                    const label = localizedPaymentMethodName(m.id, m.name, lang);
+                    return (
+                      <SelectItem key={m.id} value={m.id} textValue={label}>
+                        <span className="flex items-center gap-2">
+                          <CategoryGlyph iconKey={m.iconKey} className="size-3.5" />
+                          <ColorBadge color={m.color} />
+                          <SelectItemText>{label}</SelectItemText>
+                        </span>
+                      </SelectItem>
+                    );
+                  })}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="hist-dest" className="text-xs font-medium text-muted-foreground">
+                {t.historyFilterDestinationLabel}
+              </Label>
+              <Select value={destinationFilter} onValueChange={setDestinationFilter}>
+                <SelectTrigger id="hist-dest" className="min-h-10 w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent position="popper">
+                  <SelectItem value={DEST_FILTER_ALL} textValue={t.historyAllDestinationAccounts}>
+                    <SelectItemText>{t.historyAllDestinationAccounts}</SelectItemText>
+                  </SelectItem>
+                  {destinationAccounts.map((m) => {
+                    const label = localizedDestinationAccountName(m.id, m.name, lang);
+                    return (
+                      <SelectItem key={m.id} value={m.id} textValue={label}>
+                        <span className="flex items-center gap-2">
+                          <CategoryGlyph iconKey={m.iconKey} className="size-3.5" />
+                          <ColorBadge color={m.color} />
+                          <SelectItemText>{label}</SelectItemText>
+                        </span>
+                      </SelectItem>
+                    );
+                  })}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="hist-sort" className="text-xs font-medium text-muted-foreground">
+                {t.historySortLabel}
+              </Label>
+              <Select value={sortBy} onValueChange={(v) => setSortBy(v as typeof sortBy)}>
+                <SelectTrigger id="hist-sort" className="min-h-10 w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent position="popper">
+                  <SelectItem value="newest" textValue={t.historySortNewest}>
+                    <SelectItemText>{t.historySortNewest}</SelectItemText>
+                  </SelectItem>
+                  <SelectItem value="oldest" textValue={t.historySortOldest}>
+                    <SelectItemText>{t.historySortOldest}</SelectItemText>
+                  </SelectItem>
+                  <SelectItem value="amountDesc" textValue={t.historySortAmountDesc}>
+                    <SelectItemText>{t.historySortAmountDesc}</SelectItemText>
+                  </SelectItem>
+                  <SelectItem value="amountAsc" textValue={t.historySortAmountAsc}>
+                    <SelectItemText>{t.historySortAmountAsc}</SelectItemText>
+                  </SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
           </div>
         </div>
       </div>
 
-      <ul className="mx-auto flex w-full max-w-lg flex-col gap-2 pb-2">
+      <ul className="mx-auto flex w-full max-w-4xl flex-col gap-2 pb-2 px-0 sm:px-1">
         {filtered.length === 0 ? (
           <p className="py-8 text-center text-sm text-muted-foreground">
             {t.historyEmpty}
           </p>
         ) : (
           pagedFiltered.map((e) => {
-            const cat = resolveTransactionCategory(
-              e.categoryId,
-              e.type,
-              expenseCategories,
-              incomeSources,
-            );
-            const dateLabel = formatDateDDMMYYYY(e.date);
+            const rowType = normalizeHistoryEntryType(e);
+            let cat: ReturnType<typeof resolveTransactionCategory> = null;
+            try {
+              cat = resolveTransactionCategory(
+                typeof e.categoryId === "string" ? e.categoryId : "",
+                rowType,
+                expenseCategories,
+                incomeSources,
+              );
+            } catch {
+              cat = null;
+            }
+            const dateStr = typeof e.date === "string" ? e.date : "";
+            const dateLabel = dateStr ? formatDateDDMMYYYY(dateStr) : "—";
             const verified = e.isVerified === true;
+            const { installments: instCount, installmentIndex: instIdx } = safeHistoryInstallments(e);
             const installmentText =
-              e.type === "expense" && e.installments > 1
+              rowType === "expense" && instCount > 1
                 ? t.historyInstallmentText
-                    .replace("{{index}}", String(Math.max(1, e.installmentIndex)))
-                    .replace("{{total}}", String(Math.max(1, e.installments)))
+                    .replace("{{index}}", String(instIdx))
+                    .replace("{{total}}", String(instCount))
                 : null;
+            const receiptUrls = safeHistoryReceiptUrls(e);
+            const currencyCode = typeof e.currency === "string" && e.currency.trim() ? e.currency : "ILS";
+            const amountSafe =
+              typeof e.amount === "number" && Number.isFinite(e.amount) ? e.amount : 0;
             return (
-              <li key={e.id} className="flex w-full items-stretch gap-1">
+              <li key={e.id} className="flex w-full items-center gap-1.5">
                 <button
                   type="button"
                   onClick={() => onEditExpense(e)}
@@ -371,8 +544,13 @@ export function HistoryView({
                           }}
                         >
                           <span
-                            className="absolute start-1.5 top-1.5 size-2 rounded-full"
-                            style={{ backgroundColor: cat.color }}
+                            className="absolute start-1.5 top-1.5 size-2 rounded-full bg-muted-foreground/50"
+                            style={{
+                              backgroundColor:
+                                typeof cat.color === "string" && /^#[0-9a-fA-F]{6}$/.test(cat.color)
+                                  ? cat.color
+                                  : undefined,
+                            }}
                             aria-hidden
                           />
                           <CategoryGlyph
@@ -385,8 +563,12 @@ export function HistoryView({
                       )}
 
                       <div className="flex min-w-0 flex-col items-start text-right">
-                        <span className="truncate text-base font-semibold leading-relaxed">
-                          {cat?.name ?? "—"}
+                        <span className="min-w-0 truncate text-base font-semibold leading-relaxed">
+                          {cat
+                            ? rowType === "income"
+                              ? localizedIncomeSourceName(cat.id, cat.name, lang)
+                              : localizedExpenseCategoryName(cat.id, cat.name, lang)
+                            : "—"}
                         </span>
                         <span className="truncate text-sm text-muted-foreground">
                           {typeof e.note === "string" && e.note.trim() ? e.note : "—"}
@@ -415,20 +597,35 @@ export function HistoryView({
                       <span
                         className={cn(
                           "text-base font-semibold tabular-nums",
-                          e.type === "income" ? "text-green-500" : "text-red-500",
+                          rowType === "income" ? "text-green-500" : "text-red-500",
                         )}
                       >
-                        {e.type === "income" ? "+ " : "- "}
-                        {formatIls(convertToILS(e.amount, e.currency, e.date))}
+                        {rowType === "income" ? "+ " : "- "}
+                        {formatIls(convertToILS(amountSafe, currencyCode, dateStr || "1970-01-01"))}
                       </span>
-                      {e.currency !== "ILS" ? (
+                      {currencyCode !== "ILS" ? (
                         <span className="text-sm leading-relaxed tabular-nums text-muted-foreground">
-                          {formatCurrencyCompact(e.amount, e.currency, currencies)}
+                          {formatCurrencyCompact(amountSafe, currencyCode, currencies)}
                         </span>
                       ) : null}
                     </div>
                   </div>
                 </button>
+                {receiptUrls.length ? (
+                  <button
+                    type="button"
+                    className={cn(
+                      "flex size-10 shrink-0 items-center justify-center rounded-xl border border-border/60 bg-card text-muted-foreground/75 shadow-sm transition-colors",
+                      "hover:bg-accent/40 hover:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                    )}
+                    aria-label={t.receiptViewAria}
+                    onClick={() =>
+                      setReceiptGallery({ urls: receiptUrls, index: 0 })
+                    }
+                  >
+                    <ImageIcon className="size-4 shrink-0" strokeWidth={1.75} aria-hidden />
+                  </button>
+                ) : null}
                 <button
                   type="button"
                   className={cn(
@@ -452,9 +649,96 @@ export function HistoryView({
         )}
       </ul>
 
+      <Dialog
+        open={receiptGallery != null}
+        onOpenChange={(open) => !open && setReceiptGallery(null)}
+      >
+        <DialogContent className="max-w-[min(100vw-2rem,36rem)] gap-0 overflow-hidden p-0 sm:rounded-xl">
+          <DialogHeader className="border-b border-border/60 px-5 py-4 text-start">
+            <DialogTitle className="text-base font-medium">
+              {receiptGallery && receiptGallery.urls.length > 1
+                ? `${t.receiptDialogTitle} (${receiptGallery.index + 1}/${receiptGallery.urls.length})`
+                : t.receiptDialogTitle}
+            </DialogTitle>
+          </DialogHeader>
+          <div
+            className="relative flex max-h-[min(75dvh,28rem)] items-center justify-center bg-muted/20 p-4"
+            onTouchStart={(e) => {
+              receiptSwipeStartX.current = e.touches[0]?.clientX ?? null;
+            }}
+            onTouchEnd={(e) => {
+              const start = receiptSwipeStartX.current;
+              receiptSwipeStartX.current = null;
+              if (start == null || !receiptGallery || receiptGallery.urls.length < 2) return;
+              const end = e.changedTouches[0]?.clientX;
+              if (end == null) return;
+              const dx = end - start;
+              if (Math.abs(dx) < 48) return;
+              setReceiptGallery((g) => {
+                if (!g || g.urls.length < 2) return g;
+                if (dx > 0) {
+                  const next = (g.index - 1 + g.urls.length) % g.urls.length;
+                  return { ...g, index: next };
+                }
+                const next = (g.index + 1) % g.urls.length;
+                return { ...g, index: next };
+              });
+            }}
+          >
+            {receiptGallery?.urls[receiptGallery.index] ? (
+              <img
+                src={receiptGallery.urls[receiptGallery.index]}
+                alt=""
+                className="max-h-[min(75dvh,28rem)] w-full object-contain"
+                draggable={false}
+              />
+            ) : null}
+            {receiptGallery && receiptGallery.urls.length > 1 ? (
+              <>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="icon"
+                  className="absolute start-2 top-1/2 z-10 -translate-y-1/2 rounded-full shadow-md"
+                  aria-label={t.historyPagePrev}
+                  onClick={() =>
+                    setReceiptGallery((g) =>
+                      g && g.urls.length > 1
+                        ? {
+                            ...g,
+                            index: (g.index - 1 + g.urls.length) % g.urls.length,
+                          }
+                        : g,
+                    )
+                  }
+                >
+                  <ChevronLeft className="size-5" />
+                </Button>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="icon"
+                  className="absolute end-2 top-1/2 z-10 -translate-y-1/2 rounded-full shadow-md"
+                  aria-label={t.historyPageNext}
+                  onClick={() =>
+                    setReceiptGallery((g) =>
+                      g && g.urls.length > 1
+                        ? { ...g, index: (g.index + 1) % g.urls.length }
+                        : g,
+                    )
+                  }
+                >
+                  <ChevronRight className="size-5" />
+                </Button>
+              </>
+            ) : null}
+          </div>
+        </DialogContent>
+      </Dialog>
+
       {filtered.length > 0 ? (
         <footer
-          className="sticky bottom-0 z-10 mx-auto flex w-full max-w-lg flex-wrap items-center justify-between gap-3 border-t border-border/80 bg-background/95 px-4 py-3 backdrop-blur supports-[backdrop-filter]:bg-background/80"
+          className="sticky bottom-0 z-10 mx-auto flex w-full max-w-4xl flex-wrap items-center justify-between gap-3 border-t border-border/80 bg-background/95 px-4 py-3 backdrop-blur supports-[backdrop-filter]:bg-background/80"
           dir="ltr"
         >
           <div className="flex items-center gap-2">

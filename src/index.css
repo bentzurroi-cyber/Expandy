@@ -52,6 +52,11 @@
     @apply border-border;
   }
 
+  html {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
   body {
     @apply min-h-dvh bg-background font-sans text-foreground antialiased;
     padding-bottom: env(safe-area-inset-bottom);
@@ -88,4 +93,13 @@ input[type="number"] {
 }
 .entry-category-grid-wiggle {
   animation: entry-category-ring-pulse 1.1s ease-in-out infinite;
+}
+
+/* Hide scrollbar but keep scrolling (used in dialogs/popups). */
+.no-scrollbar {
+  -ms-overflow-style: none; /* IE/Edge */
+  scrollbar-width: none; /* Firefox */
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none; /* Chrome/Safari */
 }

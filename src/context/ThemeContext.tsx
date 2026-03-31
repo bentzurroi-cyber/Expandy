@@ -30,19 +30,22 @@ function readStoredTheme(): Theme {
   return "dark";
 }
 
+function applyThemeClass(theme: Theme) {
+  if (typeof document === "undefined") return;
+  const root = document.documentElement;
+  root.classList.remove("dark");
+  if (theme === "dark") root.classList.add("dark");
+}
+
 export function ThemeProvider({ children }: { children: ReactNode }) {
   const [theme, setThemeState] = useState<Theme>(() => {
     const t = readStoredTheme();
-    if (typeof document !== "undefined") {
-      const root = document.documentElement;
-      root.classList.toggle("dark", t === "dark");
-    }
+    applyThemeClass(t);
     return t;
   });
 
   useEffect(() => {
-    const root = document.documentElement;
-    root.classList.toggle("dark", theme === "dark");
+    applyThemeClass(theme);
     try {
       localStorage.setItem(STORAGE_KEY, theme);
     } catch {

@@ -30,10 +30,10 @@ function Calendar({ className, classNames, ...props }: CalendarProps) {
         weekdays: "flex",
         weekday: "w-9 text-center text-sm font-normal leading-relaxed text-muted-foreground",
         week: "mt-2 flex w-full",
-        day: "relative h-9 w-9 p-0 text-center text-sm",
+        day: "relative z-0 h-9 w-9 p-0 text-center text-sm",
         day_button:
-          // Keep hover distinct from selected and preserve strong contrast in dark mode.
-          "inline-flex size-9 items-center justify-center rounded-xl font-normal text-foreground hover:bg-[#334155] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+          // Layer above cell chrome so numerals stay readable; touch targets unchanged.
+          "relative z-[1] inline-flex size-9 items-center justify-center rounded-xl bg-transparent font-normal text-foreground hover:bg-[#334155] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
         selected:
           // Force high-contrast selected day in all themes.
           "!bg-[#2563eb] !text-white hover:!bg-[#1d4ed8] hover:!text-white",

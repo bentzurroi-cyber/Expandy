@@ -37,4 +37,8 @@ export type ProfileRow = {
   email: string;
   household_id: string;
   is_admin: boolean;
+  /** Preferred payment method for new expenses; empty = first in list. */
+  default_payment_method_id: string;
+  /** Preferred destination account for new income; empty = first in list. */
+  default_destination_account_id: string;
 };

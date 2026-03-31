@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Download, Trash2 } from "lucide-react";
+import { Download, Lightbulb, Pencil, Trash2 } from "lucide-react";
 import { downloadExpensesCsv, type CsvLookup } from "@/lib/exportCsv";
 import { Button } from "@/components/ui/button";
 import {
@@ -34,15 +34,9 @@ import {
   AlertDialogFooter,
   AlertDialogHeader,
   AlertDialogTitle,
-  AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
 import { downloadExpensesXlsx, type XlsxLookup } from "@/lib/exportXlsx";
 import {
-  downloadEmptyImportCsvTemplate,
-  parseExpensesCsv,
-} from "@/lib/importCsv";
-import {
-  ALL_TIME_EXPORT,
   collectYearMonthsFromExpenses,
   formatYearMonth,
   hebrewMonthYearLabel,
@@ -51,6 +45,7 @@ import {
 import { useI18n } from "@/context/I18nContext";
 import { cn } from "@/lib/utils";
 import { formatNumericInput, parseNumericInput } from "@/utils/formatters";
+import { toast } from "sonner";
 import {
   Dialog,
   DialogContent,
@@ -60,6 +55,14 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { InstallAppCard } from "@/components/settings/InstallAppCard";
+import { ImportReviewModal } from "@/components/settings/ImportReviewModal";
+import { DatePickerField } from "@/components/expense/DatePickerField";
+import {
+  localizedDestinationAccountName,
+  localizedExpenseCategoryName,
+  localizedIncomeSourceName,
+  localizedPaymentMethodName,
+} from "@/lib/defaultEntityLabels";
 import { SortableSettingsCategoryList } from "@/components/settings/SortableSettingsCategoryList";
 import { useAuth } from "@/context/AuthContext";
 import { supabase } from "@/lib/supabase";
@@ -68,6 +71,21 @@ import {
   isValidHouseholdCode,
   normalizeHouseholdCode,
 } from "@/lib/household";
+import { DEFAULT_CURRENCY } from "@/data/mock";
+import { parseImportFile } from "@/lib/smartImport/parseFile";
+import {
+  assetRowToPayload,
+  buildAssetImportRows,
+  buildIncomeImportRows,
+  incomeRowToExpenseInput,
+  type AssetImportRow,
+  type IncomeImportRow,
+} from "@/lib/smartImport/buildRows";
+import {
+  downloadAssetImportTemplate,
+  downloadExpenseImportTemplate,
+  downloadIncomeImportTemplate,
+} from "@/lib/smartImport/templates";
 
 async function countProfilesForHousehold(householdId: string): Promise<number> {
   const { count, error } = await supabase
@@ -100,16 +118,27 @@ async function countHouseholdSharedDataRows(householdId: string): Promise<number
 }
 
 export function SettingsView() {
+  const IMPORT_TOAST_ID = {
+    assets: "import-assets-status",
+    incomes: "import-incomes-status",
+    expenses: "import-expenses-status",
+  } as const;
   const { lang, setLang, t, dir } = useI18n();
   const { user, profile, refreshProfile } = useAuth();
-  const { getBudget, setBudget, clearAllUserData: clearBudgetData } =
-    useBudgets();
+  const {
+    getBudget,
+    setBudget,
+    getMonthlyBudgetTotal,
+    setMonthlyBudgetTotal,
+    clearAllUserData: clearBudgetData,
+  } = useBudgets();
   const {
     clearAllUserData: clearAssetsData,
     assetTypes,
     addAssetType,
     updateAssetType,
     deleteAssetType,
+    bulkImportAssets,
   } = useAssets();
   const {
     expenses,
@@ -120,7 +149,8 @@ export function SettingsView() {
     currencies,
     addManagedCurrency,
     removeManagedCurrency,
-    importData,
+    bulkImportIncomes,
+    bulkImportExpenses,
     clearAllUserData: clearExpensesData,
     updateExpenseCategory,
     deleteExpenseCategory,
@@ -135,10 +165,12 @@ export function SettingsView() {
   const [deleteIncomeOpen, setDeleteIncomeOpen] = useState(false);
   const [deleteIncomeId, setDeleteIncomeId] = useState<string | null>(null);
   const [moveToIncomeId, setMoveToIncomeId] = useState<string>("");
-  const [exportPeriod, setExportPeriod] = useState<
-    YearMonth | typeof ALL_TIME_EXPORT
-  >(ALL_TIME_EXPORT);
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [exportMode, setExportMode] = useState<"all" | "month" | "year" | "custom">("all");
+  const [exportPeriod, setExportPeriod] = useState<YearMonth>(formatYearMonth(new Date()));
+  const [exportYear, setExportYear] = useState<string>(String(new Date().getFullYear()));
+  const [exportCustomFrom, setExportCustomFrom] = useState<string>("");
+  const [exportCustomTo, setExportCustomTo] = useState<string>("");
+  const [exportFileFormat, setExportFileFormat] = useState<"xlsx" | "csv">("xlsx");
   const [showAllBudgetSettings, setShowAllBudgetSettings] = useState(false);
   const [assetTypesOpen, setAssetTypesOpen] = useState(false);
   const [newAssetTypeName, setNewAssetTypeName] = useState("");
@@ -163,6 +195,22 @@ export function SettingsView() {
   const [pendingJoinCode, setPendingJoinCode] = useState("");
   const [leaveConfirmOpen, setLeaveConfirmOpen] = useState(false);
   const [leaveDialogMemberCount, setLeaveDialogMemberCount] = useState<number | null>(null);
+  const [resetDataDialogOpen, setResetDataDialogOpen] = useState(false);
+  const [resetHouseholdWarnOpen, setResetHouseholdWarnOpen] = useState(false);
+  const [importReview, setImportReview] = useState<
+    | null
+    | { mode: "assets"; rows: AssetImportRow[]; sessionId: string }
+    | { mode: "incomes"; rows: IncomeImportRow[]; sessionId: string }
+    | { mode: "expenses"; rows: IncomeImportRow[]; sessionId: string }
+  >(null);
+  const importAssetsInputRef = useRef<HTMLInputElement | null>(null);
+  const importIncomesInputRef = useRef<HTMLInputElement | null>(null);
+  const importExpensesInputRef = useRef<HTMLInputElement | null>(null);
+  const [activeTab, setActiveTab] = useState<"general" | "finance" | "data">("general");
+  const [monthlyBudgetDraft, setMonthlyBudgetDraft] = useState("");
+  const [monthlyBudgetSaveState, setMonthlyBudgetSaveState] = useState<
+    "idle" | "saving" | "saved"
+  >("idle");
 
   function randomHouseholdCode6(): string {
     const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -195,6 +243,26 @@ export function SettingsView() {
   useEffect(() => {
     setDisplayHouseholdCode(normalizeHouseholdCode(profile?.household_id ?? ""));
   }, [profile?.household_id]);
+
+  useEffect(() => {
+    const total = getMonthlyBudgetTotal();
+    const formatted = formatNumericInput(String(total || ""));
+    setMonthlyBudgetDraft(formatted);
+  }, [getMonthlyBudgetTotal]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      const numeric = parseNumericInput(monthlyBudgetDraft);
+      const next = numeric != null && Number.isFinite(numeric) && numeric >= 0 ? numeric : 0;
+      if (Math.abs(next - getMonthlyBudgetTotal()) < 0.005) return;
+      setMonthlyBudgetSaveState("saving");
+      void setMonthlyBudgetTotal(next).then((ok) => {
+        if (ok) setMonthlyBudgetSaveState("saved");
+        else setMonthlyBudgetSaveState("idle");
+      });
+    }, 450);
+    return () => window.clearTimeout(timer);
+  }, [monthlyBudgetDraft, getMonthlyBudgetTotal, setMonthlyBudgetTotal]);
 
   useEffect(() => {
     if (!leaveConfirmOpen) {
@@ -357,6 +425,36 @@ export function SettingsView() {
     if (showAllBudgetSettings || sorted.length <= 5) return sorted;
     return sorted.slice(0, 5);
   }, [sorted, showAllBudgetSettings]);
+  const totalCategoryBudget = useMemo(
+    () => sorted.reduce((sum, c) => sum + getBudget(c.id), 0),
+    [sorted, getBudget],
+  );
+  const monthlyBudgetTotal = useMemo(() => {
+    const n = parseNumericInput(monthlyBudgetDraft);
+    return n != null && Number.isFinite(n) && n >= 0 ? n : 0;
+  }, [monthlyBudgetDraft]);
+  const categoryBudgetGap = monthlyBudgetTotal - totalCategoryBudget;
+
+  const categoryBudgetGapLine = useMemo(() => {
+    const g = Math.round(categoryBudgetGap);
+    const abs = formatNumericInput(String(Math.abs(g)));
+    if (g === 0) {
+      return {
+        he: "פער: אין",
+        en: "Gap: None",
+      };
+    }
+    if (g > 0) {
+      return {
+        he: `פער: ${abs} (פחות מהתקציב החודשי)`,
+        en: `Gap: ${abs} (below monthly budget)` ,
+      };
+    }
+    return {
+      he: `פער ${abs} · מעל לתקציב החודשי`,
+      en: `Gap ${abs} · above monthly budget`,
+    };
+  }, [categoryBudgetGap]);
 
   const exportMonthOptions = useMemo(() => {
     const cur = formatYearMonth(new Date());
@@ -364,6 +462,23 @@ export function SettingsView() {
     const uniq = new Set<YearMonth>([cur, ...from]);
     return [...uniq].sort((a, b) => b.localeCompare(a));
   }, [expenses]);
+
+  const currencyToCode = useCallback(
+    (raw: string) => {
+      const s = raw.trim();
+      if (!s) return DEFAULT_CURRENCY;
+      const exactCode = currencies.find((c) => c.code === s);
+      if (exactCode) return exactCode.code;
+      const exactLabel = currencies.find((c) => c.labelHe === s);
+      if (exactLabel) return exactLabel.code;
+      const exactSymbol = currencies.find((c) => c.symbol === s);
+      if (exactSymbol) return exactSymbol.code;
+      const byContains = currencies.find((c) => s.includes(c.code));
+      if (byContains) return byContains.code;
+      return DEFAULT_CURRENCY;
+    },
+    [currencies],
+  );
 
   const xlsxLookup = useMemo<XlsxLookup>(
     () => ({
@@ -381,91 +496,112 @@ export function SettingsView() {
   );
 
   function exportRowsForPeriod() {
-    return exportPeriod === ALL_TIME_EXPORT
-      ? expenses
-      : expenses.filter((e) => e.date.startsWith(exportPeriod));
+    if (exportMode === "all") return expenses;
+    if (exportMode === "month") {
+      return expenses.filter((e) => e.date.startsWith(exportPeriod));
+    }
+    if (exportMode === "year") {
+      return expenses.filter((e) => e.date.startsWith(`${exportYear}-`));
+    }
+    if (!exportCustomFrom || !exportCustomTo) return [];
+    const from = exportCustomFrom <= exportCustomTo ? exportCustomFrom : exportCustomTo;
+    const to = exportCustomFrom <= exportCustomTo ? exportCustomTo : exportCustomFrom;
+    return expenses.filter((e) => e.date >= from && e.date <= to);
+  }
+
+  function exportSuffix() {
+    if (exportMode === "all") return "kol-hazman";
+    if (exportMode === "month") return exportPeriod;
+    if (exportMode === "year") return exportYear;
+    return `${exportCustomFrom || "custom"}_to_${exportCustomTo || "custom"}`;
   }
 
   function onExportXlsx() {
     const rows = exportRowsForPeriod();
-    const suffix =
-      exportPeriod === ALL_TIME_EXPORT ? "kol-hazman" : exportPeriod;
+    if (!rows.length) {
+      toast.error(lang === "he" ? "אין נתונים לייצוא בטווח שנבחר." : "No data to export in selected range.");
+      return;
+    }
     downloadExpensesXlsx(
       rows,
-      `expandy-hozaot-${suffix}.xlsx`,
+      `expandy-hozaot-${exportSuffix()}.xlsx`,
       currencies,
       xlsxLookup,
     );
+    toast.success(lang === "he" ? "קובץ Excel נוצר בהצלחה." : "Excel exported successfully.");
   }
 
   function onExportCsv() {
     const rows = exportRowsForPeriod();
-    const suffix =
-      exportPeriod === ALL_TIME_EXPORT ? "kol-hazman" : exportPeriod;
-    downloadExpensesCsv(rows, `expandy-hozaot-${suffix}.csv`, csvLookup);
-  }
-
-  function onDownloadTemplate() {
-    downloadEmptyImportCsvTemplate();
-  }
-
-  function onPickCsvFile() {
-    fileInputRef.current?.click();
-  }
-
-  function onCsvFileSelected(file: File | null) {
-    if (!file) return;
-    if (!file.name.toLowerCase().endsWith(".csv")) {
-      window.alert("נא לבחור קובץ CSV תקין (.csv).");
+    if (!rows.length) {
+      toast.error(lang === "he" ? "אין נתונים לייצוא בטווח שנבחר." : "No data to export in selected range.");
       return;
     }
+    downloadExpensesCsv(rows, `expandy-hozaot-${exportSuffix()}.csv`, csvLookup);
+    toast.success(lang === "he" ? "קובץ CSV נוצר בהצלחה." : "CSV exported successfully.");
+  }
 
-    const reader = new FileReader();
-    reader.onerror = () => {
-      window.alert("לא הצלחנו לקרוא את הקובץ. נסו שוב.");
-    };
-    reader.onload = () => {
+  function onExport() {
+    if (exportFileFormat === "xlsx") onExportXlsx();
+    else onExportCsv();
+  }
+
+  function onPickImportExpenses(file: File | null) {
+    if (!file) return;
+    void (async () => {
       try {
-        const text = String(reader.result ?? "");
-        const { rows, missingHeaders, errors } = parseExpensesCsv(text);
-        if (missingHeaders.length) {
-          window.alert(
-            `קובץ ה-CSV לא בפורמט הנכון. חסרים העמודות: ${missingHeaders.join(", ")}`,
-          );
-          return;
-        }
-        if (errors.length) {
-          window.alert(`שגיאת CSV: ${errors[0]}`);
-        }
-
-        if (!rows.length) {
-          window.alert("לא נמצאו שורות תקינות לייבוא. בדקו את הקובץ.");
-          return;
-        }
-        const res = importData(rows);
-        window.alert(
-          `הייבוא הושלם: ${res.imported} שורות נוספות. ${
-            res.skipped ? `(${res.skipped} שורות נדחו)` : ""
-          }${res.newCategories ? ` · נוספו ${res.newCategories} קטגוריות` : ""}${
-            res.newMethods ? ` · נוספו ${res.newMethods} אמצעי תשלום/חשבונות` : ""
-          }`,
+        const sheet = await parseImportFile(file);
+        const built = buildIncomeImportRows(
+          sheet,
+          expenseCategories,
+          paymentMethods,
+          currencyToCode,
         );
+        if (built.fatal) {
+          toast.error(built.fatal);
+          return;
+        }
+        if (!built.rows.length) {
+          toast.error(lang === "he" ? "לא נמצאו שורות הוצאה לייבוא." : "No expense rows found to import.");
+          return;
+        }
+        setImportReview({
+          mode: "expenses",
+          rows: built.rows,
+          sessionId: `${Date.now()}-${file.name}`,
+        });
       } catch {
-        window.alert("אירעה שגיאה בזמן ייבוא. נסו קובץ אחר.");
+        toast.error(t.importParseError);
       } finally {
-        if (fileInputRef.current) fileInputRef.current.value = "";
+        if (importExpensesInputRef.current) importExpensesInputRef.current.value = "";
       }
-    };
-
-    reader.readAsText(file, "utf-8");
+    })();
   }
 
   async function onClearAllData() {
     await clearExpensesData();
     clearAssetsData();
     clearBudgetData();
-    window.alert(t.clearAllDataSuccess);
+    toast.success(t.clearAllDataSuccess);
     window.location.reload();
+  }
+
+  async function handleResetDataFirstConfirm() {
+    setResetDataDialogOpen(false);
+    const code = normalizeHouseholdCode(profile?.household_id ?? "");
+    if (user && isValidHouseholdCode(code)) {
+      const n = await countProfilesForHousehold(code);
+      if (n > 1) {
+        setResetHouseholdWarnOpen(true);
+        return;
+      }
+    }
+    await onClearAllData();
+  }
+
+  async function handleResetHouseholdFinalConfirm() {
+    setResetHouseholdWarnOpen(false);
+    await onClearAllData();
   }
 
   async function onCopyHouseholdId() {
@@ -473,9 +609,9 @@ export function SettingsView() {
     if (!id) return;
     try {
       await navigator.clipboard.writeText(id);
-      window.alert(lang === "he" ? "מזהה משק הבית הועתק." : "Household ID copied.");
+      toast.success(lang === "he" ? "מזהה משק הבית הועתק." : "Household ID copied.");
     } catch {
-      window.alert(id);
+      toast.info(id);
     }
   }
 
@@ -483,7 +619,7 @@ export function SettingsView() {
     const nextId = normalizeHouseholdCode(joinHouseholdId);
     if (!nextId || !user?.id) return;
     if (!/^[A-Z0-9]{6}$/.test(nextId)) {
-      window.alert(
+      toast.error(
         lang === "he"
           ? "אנא הזן קוד משק בית תקין בן 6 תווים."
           : "Please enter a valid 6-character household code.",
@@ -494,7 +630,7 @@ export function SettingsView() {
     try {
       const exists = await doesHouseholdCodeExist(nextId);
       if (!exists) {
-        window.alert(
+        toast.error(
           lang === "he"
             ? "לא מצאנו משק בית עם הקוד הזה. אפשר לנסות שוב בנחת."
             : "We could not find a household with this code. Please try again.",
@@ -504,7 +640,7 @@ export function SettingsView() {
       setPendingJoinCode(nextId);
       setJoinConfirmOpen(true);
     } catch {
-      window.alert(
+      toast.error(
         lang === "he"
           ? "לא הצלחנו לאמת את הקוד כרגע. נסה שוב בעוד רגע."
           : "Could not validate the code right now. Please try again.",
@@ -522,7 +658,7 @@ export function SettingsView() {
     try {
       const exists = await doesHouseholdCodeExist(nextId);
       if (!exists) {
-        window.alert(lang === "he" ? "הקוד כבר לא קיים. נסה שוב." : "Code no longer exists.");
+        toast.error(lang === "he" ? "הקוד כבר לא קיים. נסה שוב." : "Code no longer exists.");
         return;
       }
       // Move expenses first while profile.household_id still matches those rows (RLS).
@@ -533,7 +669,7 @@ export function SettingsView() {
           .eq("user_id", user.id)
           .eq("household_id", oldHouseholdId);
         if (migrateError) {
-          window.alert(
+          toast.error(
             lang === "he"
               ? `ייבוא הנתונים נכשל: ${migrateError.message}`
               : `Could not import your expenses: ${migrateError.message}`,
@@ -546,7 +682,7 @@ export function SettingsView() {
         .update({ household_id: nextId })
         .eq("id", user.id);
       if (updateProfileError) {
-        window.alert(
+        toast.error(
           lang === "he"
             ? `הצטרפות למשק הבית נכשלה: ${updateProfileError.message}`
             : `Failed to join household: ${updateProfileError.message}`,
@@ -560,7 +696,7 @@ export function SettingsView() {
         .eq("id", user.id)
         .maybeSingle();
       if (normalizeHouseholdCode(refreshedProfile?.household_id ?? "") !== nextId) {
-        window.alert(
+        toast.error(
           lang === "he"
             ? "ההצטרפות עוד לא הסתנכרנה. נסה שוב בעוד רגע."
             : "Join has not synced yet. Please try again in a moment.",
@@ -572,7 +708,7 @@ export function SettingsView() {
       setPendingJoinCode("");
       setJoinConfirmOpen(false);
       void loadHouseholdMembers();
-      window.alert(
+      toast.success(
         lang === "he"
           ? "הצטרפת בהצלחה למשק הבית. הנתונים המשותפים מוכנים."
           : "Joined household successfully. Shared data is ready.",
@@ -589,7 +725,7 @@ export function SettingsView() {
       window.location.href = "/";
     } catch (err) {
       console.error("[Settings] handleLogout crashed", err);
-      window.alert(
+      toast.error(
         `Logout Error: ${err instanceof Error ? err.message : "Unknown logout error"}`,
       );
     }
@@ -601,7 +737,7 @@ export function SettingsView() {
     try {
       const oldHouseholdId = normalizeHouseholdCode(profile?.household_id ?? "");
       if (!oldHouseholdId) {
-        window.alert(
+        toast.error(
           lang === "he" ? "אין משק בית פעיל." : "No active household.",
         );
         return;
@@ -609,7 +745,7 @@ export function SettingsView() {
 
       const memberCount = await countProfilesForHousehold(oldHouseholdId);
       if (memberCount < 0) {
-        window.alert(
+        toast.error(
           lang === "he"
             ? "לא הצלחנו לבדוק את מספר החברים. נסה שוב."
             : "Could not verify household members. Please try again.",
@@ -626,7 +762,7 @@ export function SettingsView() {
             .eq("user_id", user.id)
             .eq("household_id", oldHouseholdId);
           if (migrateMineError) {
-            window.alert(`Update Error: ${migrateMineError.message}`);
+            toast.error(`Update Error: ${migrateMineError.message}`);
             return;
           }
         }
@@ -642,7 +778,7 @@ export function SettingsView() {
         .update({ household_id: newCode })
         .eq("id", user.id);
       if (updateError) {
-        window.alert(`Update Error: ${updateError.message}`);
+        toast.error(`Update Error: ${updateError.message}`);
         return;
       }
 
@@ -660,7 +796,7 @@ export function SettingsView() {
       await refreshProfile();
       setLeaveConfirmOpen(false);
       void loadHouseholdMembers();
-      window.alert(
+      toast.success(
         lang === "he"
           ? `עודכן קוד משק בית חדש: ${newCode}`
           : `New household code updated: ${newCode}`,
@@ -670,7 +806,7 @@ export function SettingsView() {
         userId: user?.id,
         err,
       });
-      window.alert(
+      toast.error(
         `Leave Household Error: ${
           err instanceof Error ? err.message : "Unknown household leave error"
         }`,
@@ -685,9 +821,111 @@ export function SettingsView() {
     await handleLeaveHousehold(mode);
   }
 
+  async function onPickImportAssets(file: File | null) {
+    if (!file) return;
+    try {
+      const sheet = await parseImportFile(file);
+      const built = buildAssetImportRows(sheet, assetTypes);
+      if (built.fatal) {
+        toast.error(built.fatal);
+        return;
+      }
+      if (!built.rows.length) {
+        toast.error(lang === "he" ? "לא נמצאו שורות בקובץ." : "No rows found in file.");
+        return;
+      }
+      setImportReview({
+        mode: "assets",
+        rows: built.rows,
+        sessionId: `${Date.now()}-${file.name}`,
+      });
+    } catch {
+      toast.error(t.importParseError);
+    } finally {
+      if (importAssetsInputRef.current) importAssetsInputRef.current.value = "";
+    }
+  }
+
+  async function onPickImportIncomes(file: File | null) {
+    if (!file) return;
+    try {
+      const sheet = await parseImportFile(file);
+      const built = buildIncomeImportRows(
+        sheet,
+        incomeSources,
+        destinationAccounts,
+        currencyToCode,
+      );
+      if (built.fatal) {
+        toast.error(built.fatal);
+        return;
+      }
+      if (!built.rows.length) {
+        toast.error(lang === "he" ? "לא נמצאו שורות בקובץ." : "No rows found in file.");
+        return;
+      }
+      setImportReview({
+        mode: "incomes",
+        rows: built.rows,
+        sessionId: `${Date.now()}-${file.name}`,
+      });
+    } catch {
+      toast.error(t.importParseError);
+    } finally {
+      if (importIncomesInputRef.current) importIncomesInputRef.current.value = "";
+    }
+  }
+
+  function importSuccessMessageAssets(count: number): string {
+    return t.importSuccessAssets.replace(/\{\{count\}\}/g, String(count));
+  }
+
+  function importSuccessMessageIncomes(count: number): string {
+    return t.importSuccessIncomes.replace(/\{\{count\}\}/g, String(count));
+  }
+
   return (
     <div className="flex flex-col gap-6">
-      <Card className="border-border/80 shadow-none">
+      <div className="sticky top-2 z-20 rounded-2xl border border-border/70 bg-background/90 p-2 backdrop-blur">
+        <div className="grid grid-cols-3 gap-2 rounded-xl bg-muted/50 p-1">
+          <Button
+            type="button"
+            variant="ghost"
+            className={cn(
+              "rounded-xl",
+              activeTab === "general" && "bg-foreground text-background hover:bg-foreground/90",
+            )}
+            onClick={() => setActiveTab("general")}
+          >
+            כללי
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            className={cn(
+              "rounded-xl",
+              activeTab === "finance" && "bg-foreground text-background hover:bg-foreground/90",
+            )}
+            onClick={() => setActiveTab("finance")}
+          >
+            פיננסים
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            className={cn(
+              "rounded-xl",
+              activeTab === "data" && "bg-foreground text-background hover:bg-foreground/90",
+            )}
+            onClick={() => setActiveTab("data")}
+          >
+            נתונים ואבטחה
+          </Button>
+        </div>
+      </div>
+
+      {activeTab === "general" ? (
+      <Card className="rounded-2xl border-border/80 bg-zinc-100 p-1 shadow-none dark:bg-zinc-900">
         <CardHeader className="space-y-1">
           <CardTitle>{t.settingsTitle}</CardTitle>
           <CardDescription>{t.settingsSubtitleLead}</CardDescription>
@@ -794,22 +1032,27 @@ export function SettingsView() {
           </Button>
         </CardContent>
       </Card>
+      ) : null}
 
-      <Card className="border-border/80 shadow-none">
-        <CardHeader className="space-y-1">
+      {activeTab === "general" ? (
+      <Card className="rounded-2xl border-border/80 bg-zinc-100 p-1 shadow-none dark:bg-zinc-900">
+        <CardHeader className="space-y-1 pb-2">
           <CardTitle className="text-base">
             {lang === "he" ? "שפה" : "Language"}
           </CardTitle>
-          <CardDescription>
+          <CardDescription className="text-sm">
             {lang === "he"
               ? "בחירת שפת ממשק וכיוון כתיבה (RTL/LTR)."
               : "Choose UI language and writing direction (RTL/LTR)."}
           </CardDescription>
         </CardHeader>
-        <CardContent className="space-y-2">
-          <Label htmlFor="lang">{lang === "he" ? "שפה" : "Language"}</Label>
+        <CardContent className="pt-0">
           <Select value={lang} onValueChange={(v) => setLang(v as "he" | "en")}>
-            <SelectTrigger id="lang" className="w-full">
+            <SelectTrigger
+              id="lang"
+              className="w-full"
+              aria-label={lang === "he" ? "שפה" : "Language"}
+            >
               <SelectValue />
             </SelectTrigger>
             <SelectContent position="popper">
@@ -823,10 +1066,112 @@ export function SettingsView() {
           </Select>
         </CardContent>
       </Card>
+      ) : null}
 
-      <InstallAppCard />
+      {activeTab === "general" ? <InstallAppCard /> : null}
 
-      <Card className="border-border/80 shadow-none">
+      {activeTab === "data" ? (
+      <Card className="rounded-2xl border-border/80 bg-zinc-100 p-1 shadow-none dark:bg-zinc-900">
+        <CardHeader className="space-y-1">
+          <CardTitle className="text-base">{t.dataManagementTitle}</CardTitle>
+          <CardDescription>{t.dataManagementDesc}</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <input
+            ref={importAssetsInputRef}
+            type="file"
+            accept=".csv,.xlsx,.xls,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            className="hidden"
+            onChange={(e) => void onPickImportAssets(e.target.files?.[0] ?? null)}
+          />
+          <input
+            ref={importIncomesInputRef}
+            type="file"
+            accept=".csv,.xlsx,.xls,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            className="hidden"
+            onChange={(e) => void onPickImportIncomes(e.target.files?.[0] ?? null)}
+          />
+          <input
+            ref={importExpensesInputRef}
+            type="file"
+            accept=".csv,.xlsx,.xls,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            className="hidden"
+            onChange={(e) => onPickImportExpenses(e.target.files?.[0] ?? null)}
+          />
+          <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-start">
+            <div className="flex min-w-0 flex-1 flex-col gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                className="w-full sm:w-auto"
+                onClick={() => importAssetsInputRef.current?.click()}
+              >
+                {t.importAssets}
+              </Button>
+              <button
+                type="button"
+                className="text-start text-sm text-muted-foreground underline hover:text-foreground"
+                onClick={() => downloadAssetImportTemplate()}
+              >
+                {t.importExampleFormat}
+              </button>
+              <p className="text-xs leading-relaxed text-muted-foreground">
+                {lang === "he"
+                  ? "עמודות נדרשות: תאריך, סכום, שם, סוג (סוג נכס), מטבע (אופציונלי)."
+                  : "Required columns: Date, Amount, Name, Type (asset type), Currency (optional)."}
+              </p>
+            </div>
+            <div className="flex min-w-0 flex-1 flex-col gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                className="w-full sm:w-auto"
+                onClick={() => importExpensesInputRef.current?.click()}
+              >
+                {lang === "he" ? "ייבוא הוצאות" : "Import expenses"}
+              </Button>
+              <button
+                type="button"
+                className="text-start text-sm text-muted-foreground underline hover:text-foreground"
+                onClick={() => downloadExpenseImportTemplate()}
+              >
+                {t.importExampleFormat}
+              </button>
+              <p className="text-xs leading-relaxed text-muted-foreground">
+                {lang === "he"
+                  ? "עמודות נדרשות: תאריך, סכום, מטבע, קטגוריה, אמצעי תשלום, הערות (אופציונלי)."
+                  : "Required columns: Date, Amount, Currency, Category, Payment method, Notes (optional)."}
+              </p>
+            </div>
+            <div className="flex min-w-0 flex-1 flex-col gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                className="w-full sm:w-auto"
+                onClick={() => importIncomesInputRef.current?.click()}
+              >
+                {t.importIncomes}
+              </Button>
+              <button
+                type="button"
+                className="text-start text-sm text-muted-foreground underline hover:text-foreground"
+                onClick={() => downloadIncomeImportTemplate()}
+              >
+                {t.importExampleFormat}
+              </button>
+              <p className="text-xs leading-relaxed text-muted-foreground">
+                {lang === "he"
+                  ? "עמודות נדרשות: תאריך, סכום, מטבע, קטגוריה, חשבון יעד, הערות (אופציונלי)."
+                  : "Required columns: Date, Amount, Currency, Category, Destination account, Notes (optional)."}
+              </p>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+      ) : null}
+
+      {activeTab === "general" ? (
+      <Card className="rounded-2xl border-border/80 bg-zinc-100 p-1 shadow-none dark:bg-zinc-900">
         <CardHeader className="space-y-1">
           <CardTitle className="text-base">
             {lang === "he" ? "מטבעות מנוהלים" : "Managed Currencies"}
@@ -880,101 +1225,265 @@ export function SettingsView() {
           </div>
         </CardContent>
       </Card>
+      ) : null}
 
-      <Card className="border-border/80 shadow-none">
+      {activeTab === "finance" ? (
+      <Card className="rounded-2xl border-border/80 bg-zinc-100 p-1 shadow-none dark:bg-zinc-900">
         <CardHeader className="space-y-1">
-          <CardTitle className="text-base">{t.exportCsv}</CardTitle>
+          <CardTitle className="text-base">
+            {lang === "he" ? "ברירות מחדל" : "Defaults"}
+          </CardTitle>
+          <CardDescription>
+            {lang === "he"
+              ? "ברירות מחדל שמופיעות בטפסי הוצאה והכנסה."
+              : "Default values shown on expense and income entry forms."}
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <details className="rounded-xl border border-border/60 bg-background/40 p-3">
+            <summary className="cursor-pointer text-sm font-medium">
+              {lang === "he" ? "אמצעי תשלום" : "Default payment method"}
+            </summary>
+            <div className="mt-3 space-y-2">
+              <p className="text-sm leading-relaxed text-muted-foreground">
+                {t.settingsDefaultPaymentDesc}
+              </p>
+              <Label htmlFor="settings-default-payment">{t.paymentMethod}</Label>
+              <Select
+                value={profile?.default_payment_method_id?.trim() || "__none__"}
+                onValueChange={async (v) => {
+                  if (!user?.id) return;
+                  const next = v === "__none__" ? "" : v;
+                  const { error } = await supabase
+                    .from("profiles")
+                    .update({ default_payment_method_id: next })
+                    .eq("id", user.id);
+                  if (error) {
+                    toast.error(
+                      lang === "he"
+                        ? `שמירה נכשלה: ${error.message}`
+                        : `Could not save: ${error.message}`,
+                    );
+                    return;
+                  }
+                  await refreshProfile();
+                }}
+                disabled={!paymentMethods.length}
+              >
+                <SelectTrigger id="settings-default-payment" className="w-full">
+                  <SelectValue placeholder={t.settingsDefaultPaymentNone} />
+                </SelectTrigger>
+                <SelectContent position="popper">
+                  <SelectItem value="__none__" textValue={t.settingsDefaultPaymentNone}>
+                    <SelectItemText>{t.settingsDefaultPaymentNone}</SelectItemText>
+                  </SelectItem>
+                  {paymentMethods.map((m) => (
+                    <SelectItem
+                      key={m.id}
+                      value={m.id}
+                      textValue={localizedPaymentMethodName(m.id, m.name, lang)}
+                    >
+                      <SelectItemText>
+                        {localizedPaymentMethodName(m.id, m.name, lang)}
+                      </SelectItemText>
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-sm leading-relaxed text-muted-foreground">{t.settingsSaveNote}</p>
+            </div>
+          </details>
+          <details className="rounded-xl border border-border/60 bg-background/40 p-3">
+            <summary className="cursor-pointer text-sm font-medium">
+              {lang === "he" ? "חשבון יעד" : "Default destination account"}
+            </summary>
+            <div className="mt-3 space-y-2">
+              <p className="text-sm leading-relaxed text-muted-foreground">
+                {t.settingsDefaultDestinationDesc}
+              </p>
+              <Label htmlFor="settings-default-destination">{t.destinationAccount}</Label>
+              <Select
+                value={profile?.default_destination_account_id?.trim() || "__none__"}
+                onValueChange={async (v) => {
+                  if (!user?.id) return;
+                  const next = v === "__none__" ? "" : v;
+                  const { error } = await supabase
+                    .from("profiles")
+                    .update({ default_destination_account_id: next })
+                    .eq("id", user.id);
+                  if (error) {
+                    toast.error(
+                      lang === "he"
+                        ? `שמירה נכשלה: ${error.message}`
+                        : `Could not save: ${error.message}`,
+                    );
+                    return;
+                  }
+                  await refreshProfile();
+                }}
+                disabled={!destinationAccounts.length}
+              >
+                <SelectTrigger id="settings-default-destination" className="w-full">
+                  <SelectValue placeholder={t.settingsDefaultPaymentNone} />
+                </SelectTrigger>
+                <SelectContent position="popper">
+                  <SelectItem value="__none__" textValue={t.settingsDefaultPaymentNone}>
+                    <SelectItemText>{t.settingsDefaultPaymentNone}</SelectItemText>
+                  </SelectItem>
+                  {destinationAccounts.map((m) => (
+                    <SelectItem
+                      key={m.id}
+                      value={m.id}
+                      textValue={localizedDestinationAccountName(m.id, m.name, lang)}
+                    >
+                      <SelectItemText>
+                        {localizedDestinationAccountName(m.id, m.name, lang)}
+                      </SelectItemText>
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-sm leading-relaxed text-muted-foreground">{t.settingsSaveNote}</p>
+            </div>
+          </details>
+        </CardContent>
+      </Card>
+      ) : null}
+
+      {activeTab === "data" ? (
+      <Card className="rounded-2xl border-border/80 bg-zinc-100 p-1 shadow-none dark:bg-zinc-900">
+        <CardHeader className="space-y-1">
+          <CardTitle className="text-base">
+            {lang === "he" ? "ייצוא נתונים ל-Excel" : "Export data to Excel"}
+          </CardTitle>
           <CardDescription>{t.settingsExportDescription}</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4 p-5">
           <div className="space-y-2">
-            <Label htmlFor="export-period">{t.exportPeriodLabel}</Label>
+            <Label htmlFor="export-mode">{lang === "he" ? "טווח ייצוא" : "Export range"}</Label>
             <Select
-              value={exportPeriod}
-              onValueChange={(v) =>
-                setExportPeriod(
-                  v === ALL_TIME_EXPORT ? ALL_TIME_EXPORT : (v as YearMonth),
-                )
-              }
+              value={exportMode}
+              onValueChange={(v) => setExportMode(v as "all" | "month" | "year" | "custom")}
             >
-              <SelectTrigger id="export-period" className="w-full">
+              <SelectTrigger id="export-mode" className="w-full">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent position="popper">
-                <SelectItem
-                  value={ALL_TIME_EXPORT}
-                  textValue={t.exportAllTime}
-                >
+                <SelectItem value="all" textValue={t.exportAllTime}>
                   <SelectItemText>{t.exportAllTime}</SelectItemText>
                 </SelectItem>
-                {exportMonthOptions.map((k) => (
-                  <SelectItem
-                    key={k}
-                    value={k}
-                    textValue={hebrewMonthYearLabel(k)}
-                  >
-                    <SelectItemText>{hebrewMonthYearLabel(k)}</SelectItemText>
-                  </SelectItem>
-                ))}
+                <SelectItem value="month" textValue={lang === "he" ? "חודשי" : "Monthly"}>
+                  <SelectItemText>{lang === "he" ? "חודשי" : "Monthly"}</SelectItemText>
+                </SelectItem>
+                <SelectItem value="year" textValue={lang === "he" ? "שנתי" : "Yearly"}>
+                  <SelectItemText>{lang === "he" ? "שנתי" : "Yearly"}</SelectItemText>
+                </SelectItem>
+                <SelectItem value="custom" textValue={lang === "he" ? "טווח מותאם" : "Custom range"}>
+                  <SelectItemText>{lang === "he" ? "טווח מותאם" : "Custom range"}</SelectItemText>
+                </SelectItem>
               </SelectContent>
             </Select>
+            {exportMode === "month" ? (
+              <Select value={exportPeriod} onValueChange={(v) => setExportPeriod(v as YearMonth)}>
+                <SelectTrigger id="export-period" className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent position="popper">
+                  {exportMonthOptions.map((k) => (
+                    <SelectItem key={k} value={k} textValue={hebrewMonthYearLabel(k)}>
+                      <SelectItemText>{hebrewMonthYearLabel(k)}</SelectItemText>
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            ) : null}
+            {exportMode === "year" ? (
+              <Select value={exportYear} onValueChange={setExportYear}>
+                <SelectTrigger id="export-year" className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent position="popper">
+                  {[...new Set(expenses.map((e) => e.date.slice(0, 4)))]
+                    .sort((a, b) => b.localeCompare(a))
+                    .map((y) => (
+                      <SelectItem key={y} value={y} textValue={y}>
+                        <SelectItemText>{y}</SelectItemText>
+                      </SelectItem>
+                    ))}
+                </SelectContent>
+              </Select>
+            ) : null}
+            {exportMode === "custom" ? (
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                <DatePickerField
+                  id="export-custom-from"
+                  label={lang === "he" ? "מ־" : "From"}
+                  value={exportCustomFrom}
+                  onChange={setExportCustomFrom}
+                />
+                <DatePickerField
+                  id="export-custom-to"
+                  label={lang === "he" ? "עד ל־" : "To"}
+                  value={exportCustomTo}
+                  onChange={setExportCustomTo}
+                />
+              </div>
+            ) : null}
           </div>
-          <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap">
-            <Button
-              type="button"
-              variant="outline"
-              className="w-full gap-2 sm:w-auto"
-              onClick={onExportXlsx}
-            >
-              <Download className="size-4" aria-hidden />
-              {t.exportCsv}
-            </Button>
-            <Button
-              type="button"
-              variant="outline"
-              className="w-full gap-2 sm:w-auto"
-              onClick={onExportCsv}
-            >
-              <Download className="size-4" aria-hidden />
-              {t.exportCsvDownload}
-            </Button>
-          </div>
-
-          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".csv,text/csv"
-              className="hidden"
-              onChange={(e) => onCsvFileSelected(e.target.files?.[0] ?? null)}
-            />
-            <div className="flex items-center gap-2">
-              <Button
-                type="button"
-                variant="outline"
-                className="gap-2"
-                onClick={onPickCsvFile}
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
+            <div className="flex-1 space-y-2">
+              <Label htmlFor="export-format">
+                {lang === "he" ? "פורמט קובץ" : "File format"}
+              </Label>
+              <Select
+                value={exportFileFormat}
+                onValueChange={(v) => setExportFileFormat(v as "xlsx" | "csv")}
               >
-                ייבוא נתונים
-              </Button>
-              <button
-                type="button"
-                className="text-sm text-muted-foreground hover:text-foreground underline"
-                onClick={onDownloadTemplate}
-              >
-                הורדת תבנית ריקה
-              </button>
+                <SelectTrigger id="export-format" className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent position="popper">
+                  <SelectItem value="xlsx" textValue="Excel">
+                    <SelectItemText>
+                      {lang === "he" ? "Excel (.xlsx)" : "Excel (.xlsx)"}
+                    </SelectItemText>
+                  </SelectItem>
+                  <SelectItem value="csv" textValue="CSV">
+                    <SelectItemText>CSV</SelectItemText>
+                  </SelectItem>
+                </SelectContent>
+              </Select>
             </div>
+            <Button
+              type="button"
+              variant="outline"
+              className="w-full gap-2 sm:w-auto sm:min-w-[10rem]"
+              onClick={onExport}
+            >
+              <Download className="size-4" aria-hidden />
+              {lang === "he" ? "ייצוא" : "Export"}
+            </Button>
           </div>
         </CardContent>
       </Card>
+      ) : null}
 
-      <Card className="border-border/80 shadow-none">
+      {activeTab === "finance" ? (
+      <Card className="rounded-2xl border-border/80 bg-zinc-100 p-1 shadow-none dark:bg-zinc-900">
         <CardHeader className="space-y-1">
           <CardTitle className="text-base">{t.manageCategories}</CardTitle>
-          <CardDescription>{t.manageCategoriesDesc}</CardDescription>
+          <CardDescription>
+            {lang === "he"
+              ? "עריכה, מחיקה וסידור של קטגוריות הוצאות והכנסות ושל סוגי נכסים, כולל אייקונים וצבעים (נשמר מקומית)."
+              : "Edit, delete, and reorder expense and income categories and asset types, including icons and colors (stored locally)."}
+          </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
+          <details className="rounded-xl border border-border/60 bg-background/40 p-3">
+            <summary className="cursor-pointer text-sm font-medium">
+              {lang === "he" ? "הוצאות" : "Expense categories"}
+            </summary>
+            <div className="mt-3 space-y-4">
           <SortableSettingsCategoryList
             categories={sorted}
             showAll={showAllExpenseCategoriesSettings}
@@ -989,7 +1498,7 @@ export function SettingsView() {
                     <CategoryGlyph iconKey={c.iconKey} className="size-4" />
                     <ColorBadge color={c.color} />
                     <span className="min-w-0 truncate text-sm font-medium">
-                      {c.name}
+                      {localizedExpenseCategoryName(c.id, c.name, lang)}
                     </span>
                   </div>
                   <div className="flex shrink-0 items-center gap-2">
@@ -1000,7 +1509,7 @@ export function SettingsView() {
                         updateExpenseCategory(c.id, { color: e.target.value })
                       }
                       className="h-9 w-10 cursor-pointer rounded-md border border-border bg-transparent p-1"
-                      aria-label={`Pick color — ${c.name}`}
+                      aria-label={`Pick color — ${localizedExpenseCategoryName(c.id, c.name, lang)}`}
                     />
                     <Dialog>
                       <DialogTrigger asChild>
@@ -1011,7 +1520,9 @@ export function SettingsView() {
                       <DialogContent dir={lang === "he" ? "rtl" : "ltr"}>
                         <DialogHeader>
                           <DialogTitle>{t.pickIcon}</DialogTitle>
-                          <DialogDescription>{c.name}</DialogDescription>
+                          <DialogDescription>
+                            {localizedExpenseCategoryName(c.id, c.name, lang)}
+                          </DialogDescription>
                         </DialogHeader>
                         <IconPicker
                           value={c.iconKey}
@@ -1078,17 +1589,13 @@ export function SettingsView() {
               </Button>
             </div>
           ) : null}
-        </CardContent>
-      </Card>
-
-      <Card className="border-border/80 shadow-none">
-        <CardHeader className="space-y-1">
-          <CardTitle className="text-base">ניהול קטגוריות הכנסה</CardTitle>
-          <CardDescription>
-            עריכה, שינוי אייקון/צבע ומחיקה של קטגוריות הכנסה.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
+            </div>
+          </details>
+          <details className="rounded-xl border border-border/60 bg-background/40 p-3">
+            <summary className="cursor-pointer text-sm font-medium">
+              {lang === "he" ? "הכנסות" : "Income categories"}
+            </summary>
+            <div className="mt-3 space-y-4">
           <SortableSettingsCategoryList
             categories={sortedIncome}
             showAll={showAllIncomeCategoriesSettings}
@@ -1103,7 +1610,7 @@ export function SettingsView() {
                     <CategoryGlyph iconKey={c.iconKey} className="size-4" />
                     <ColorBadge color={c.color} />
                     <span className="min-w-0 truncate text-sm font-medium">
-                      {c.name}
+                      {localizedIncomeSourceName(c.id, c.name, lang)}
                     </span>
                   </div>
                   <div className="flex shrink-0 items-center gap-2">
@@ -1114,7 +1621,7 @@ export function SettingsView() {
                         updateIncomeSource(c.id, { color: e.target.value })
                       }
                       className="h-9 w-10 cursor-pointer rounded-md border border-border bg-transparent p-1"
-                      aria-label={`Pick color — ${c.name}`}
+                      aria-label={`Pick color — ${localizedIncomeSourceName(c.id, c.name, lang)}`}
                     />
                     <Dialog>
                       <DialogTrigger asChild>
@@ -1125,7 +1632,9 @@ export function SettingsView() {
                       <DialogContent dir={lang === "he" ? "rtl" : "ltr"}>
                         <DialogHeader>
                           <DialogTitle>{t.pickIcon}</DialogTitle>
-                          <DialogDescription>{c.name}</DialogDescription>
+                          <DialogDescription>
+                            {localizedIncomeSourceName(c.id, c.name, lang)}
+                          </DialogDescription>
                         </DialogHeader>
                         <IconPicker
                           value={c.iconKey}
@@ -1190,108 +1699,133 @@ export function SettingsView() {
               </Button>
             </div>
           ) : null}
-        </CardContent>
-      </Card>
-
-      <Card className="border-border/80 shadow-none">
-        <CardHeader className="space-y-1">
-          <CardTitle className="text-base">{t.manageAssetTypes}</CardTitle>
-          <CardDescription>{t.manageAssetTypesDesc}</CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <Dialog
-            open={assetTypesOpen}
-            onOpenChange={(o) => {
-              setAssetTypesOpen(o);
-              if (!o) setShowAllAssetTypesSettings(false);
-            }}
-          >
-            <DialogTrigger asChild>
-              <Button type="button" variant="outline" className="w-full">
-                {t.manageAssetTypes}
-              </Button>
-            </DialogTrigger>
-            <DialogContent dir={dir}>
-              <DialogHeader>
-                <DialogTitle>{t.manageAssetTypes}</DialogTitle>
-                <DialogDescription>{t.manageAssetTypesDesc}</DialogDescription>
-              </DialogHeader>
-              <div className="space-y-4">
-                <div className="space-y-2">
-                  <Label htmlFor="settings-asset-type-new">{t.assetTypeNameLabel}</Label>
-                  <div className="flex gap-2">
-                    <Input
-                      id="settings-asset-type-new"
-                      value={newAssetTypeName}
-                      onChange={(e) => setNewAssetTypeName(e.target.value)}
-                      placeholder={t.promptNewAssetType}
-                    />
-                    <Button
-                      type="button"
-                      onClick={() => {
-                        const id = addAssetType(newAssetTypeName);
-                        if (id) setNewAssetTypeName("");
-                      }}
-                    >
-                      {t.addAssetType}
-                    </Button>
-                  </div>
-                </div>
-
-                <ul className="space-y-2">
-                  {(showAllAssetTypesSettings || assetTypes.length <= 5
-                    ? assetTypes
-                    : assetTypes.slice(0, 5)
-                  ).map((type) => (
-                    <li key={type.id} className="rounded-lg border border-border/70 p-3">
-                      <div className="flex items-center gap-2">
-                        <Input
-                          value={type.name}
-                          onChange={(e) =>
-                            updateAssetType(type.id, e.target.value)
-                          }
-                        />
-                        {assetTypes.length > 1 ? (
-                          <Button
-                            type="button"
-                            variant="outline"
-                            onClick={() => {
-                              setAssetDeleteId(type.id);
-                              const fallback =
-                                assetTypes.find((x) => x.id !== type.id)?.id ?? "";
-                              setMoveAssetTypeTo(fallback);
-                              setAssetDeleteOpen(true);
-                            }}
-                          >
-                            {t.deleteAssetType}
-                          </Button>
-                        ) : null}
-                      </div>
-                    </li>
-                  ))}
-                </ul>
-                {assetTypes.length > 5 ? (
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="sm"
-                    className="w-full text-sm leading-relaxed text-muted-foreground"
-                    onClick={() =>
-                      setShowAllAssetTypesSettings((v) => !v)
-                    }
-                  >
-                    {showAllAssetTypesSettings
-                      ? t.dashboardShowLessCategories
-                      : t.dashboardShowAllCategories}
+            </div>
+          </details>
+          <details className="rounded-xl border border-border/60 bg-background/40 p-3">
+            <summary className="cursor-pointer text-sm font-medium">
+              {lang === "he" ? "סוגי נכסים" : "Asset types"}
+            </summary>
+            <div className="mt-3 space-y-3">
+              <p className="text-sm leading-relaxed text-muted-foreground">
+                {t.manageAssetTypesDesc}
+              </p>
+              <Dialog
+                open={assetTypesOpen}
+                onOpenChange={(o) => {
+                  setAssetTypesOpen(o);
+                  if (!o) setShowAllAssetTypesSettings(false);
+                }}
+              >
+                <DialogTrigger asChild>
+                  <Button type="button" variant="outline" className="w-full">
+                    {t.manageAssetTypes}
                   </Button>
-                ) : null}
-              </div>
-            </DialogContent>
-          </Dialog>
+                </DialogTrigger>
+                <DialogContent dir={dir}>
+                  <DialogHeader>
+                    <DialogTitle>{t.manageAssetTypes}</DialogTitle>
+                    <DialogDescription>{t.manageAssetTypesDesc}</DialogDescription>
+                  </DialogHeader>
+                  <div className="space-y-4">
+                    <div className="space-y-2">
+                      <Label htmlFor="settings-asset-type-new">{t.assetTypeNameLabel}</Label>
+                      <div className="flex gap-2">
+                        <Input
+                          id="settings-asset-type-new"
+                          value={newAssetTypeName}
+                          onChange={(e) => setNewAssetTypeName(e.target.value)}
+                          placeholder={t.promptNewAssetType}
+                        />
+                        <Button
+                          type="button"
+                          onClick={() => {
+                            const id = addAssetType(newAssetTypeName);
+                            if (id) setNewAssetTypeName("");
+                          }}
+                        >
+                          {t.addAssetType}
+                        </Button>
+                      </div>
+                    </div>
+
+                    <ul className="space-y-2">
+                      {(showAllAssetTypesSettings || assetTypes.length <= 5
+                        ? assetTypes
+                        : assetTypes.slice(0, 5)
+                      ).map((type) => (
+                        <li key={type.id} className="rounded-lg border border-border/70 p-3">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <Input
+                              className="min-w-0 flex-1"
+                              value={type.name}
+                              onChange={(e) =>
+                                updateAssetType(type.id, { name: e.target.value })
+                              }
+                            />
+                            <div className="flex shrink-0 items-center gap-1.5">
+                              <Label
+                                htmlFor={`settings-asset-type-color-${type.id}`}
+                                className="sr-only"
+                              >
+                                {t.assetTypeColorLabel}
+                              </Label>
+                              <Input
+                                id={`settings-asset-type-color-${type.id}`}
+                                type="color"
+                                value={type.color}
+                                onChange={(e) =>
+                                  updateAssetType(type.id, { color: e.target.value })
+                                }
+                                className="h-9 w-11 cursor-pointer p-1"
+                                title={t.assetTypeColorLabel}
+                                aria-label={t.assetTypeColorLabel}
+                              />
+                            </div>
+                            {assetTypes.length > 1 ? (
+                              <Button
+                                type="button"
+                                variant="outline"
+                                onClick={() => {
+                                  setAssetDeleteId(type.id);
+                                  const fallback =
+                                    assetTypes.find((x) => x.id !== type.id)?.id ?? "";
+                                  setMoveAssetTypeTo(fallback);
+                                  setAssetDeleteOpen(true);
+                                }}
+                              >
+                                {t.deleteAssetType}
+                              </Button>
+                            ) : null}
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                    {assetTypes.length > 5 ? (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        className="w-full text-sm leading-relaxed text-muted-foreground"
+                        onClick={() =>
+                          setShowAllAssetTypesSettings((v) => !v)
+                        }
+                      >
+                        {showAllAssetTypesSettings
+                          ? t.dashboardShowLessCategories
+                          : t.dashboardShowAllCategories}
+                      </Button>
+                    ) : null}
+                  </div>
+                </DialogContent>
+              </Dialog>
+            </div>
+          </details>
         </CardContent>
       </Card>
+      ) : null}
 
-      <Card className="border-border/80 shadow-none">
+      {activeTab === "finance" ? (
+      <Card className="rounded-2xl border-border/80 bg-zinc-100 p-1 shadow-none dark:bg-zinc-900">
         <CardHeader className="space-y-1 px-4 pb-2 pt-4">
           <CardTitle className="text-base">{t.settingsBudgetsSection}</CardTitle>
           <CardDescription className="text-sm leading-relaxed">
@@ -1299,6 +1833,55 @@ export function SettingsView() {
           </CardDescription>
         </CardHeader>
         <CardContent className="p-5">
+          <div className="mb-4 rounded-xl border border-border/60 bg-background/40 p-3">
+            <Label htmlFor="monthly-budget" className="text-sm font-medium">
+              {lang === "he" ? "הגדרת תקציב חודשי" : "Monthly budget setup"}
+            </Label>
+            <div className="mt-2">
+              <Input
+                id="monthly-budget"
+                value={monthlyBudgetDraft}
+                onChange={(e) => setMonthlyBudgetDraft(formatNumericInput(e.target.value))}
+                inputMode="decimal"
+                dir="ltr"
+                placeholder={lang === "he" ? "למשל 10,000" : "e.g. 10,000"}
+              />
+            </div>
+            <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+              {monthlyBudgetSaveState === "saving"
+                ? lang === "he"
+                  ? "שומר..."
+                  : "Saving..."
+                : monthlyBudgetSaveState === "saved"
+                  ? lang === "he"
+                    ? "נשמר"
+                    : "Saved"
+                  : lang === "he"
+                    ? "שמירה אוטומטית"
+                    : "Autosave enabled"}
+            </p>
+            <div className="mt-1 space-y-1 text-xs leading-snug text-muted-foreground">
+              <p>
+                {lang === "he"
+                  ? `סה"כ בקטגוריות: ${formatNumericInput(String(Math.round(totalCategoryBudget)))}`
+                  : `Categories total: ${formatNumericInput(String(Math.round(totalCategoryBudget)))}`}
+              </p>
+              <p className="text-foreground/90">
+                {lang === "he" ? categoryBudgetGapLine.he : categoryBudgetGapLine.en}
+              </p>
+              <p className="flex items-start gap-1.5">
+                <Lightbulb
+                  className="mt-0.5 size-3.5 shrink-0 text-amber-500/85"
+                  aria-hidden
+                />
+                <span>
+                  {lang === "he"
+                    ? "המלצה: לקרב את סך תקציב הקטגוריות לתקציב החודשי הכולל."
+                    : "Recommendation: align total category budgets with the overall monthly budget."}
+                </span>
+              </p>
+            </div>
+          </div>
           <ul
             className="divide-y divide-border/50 rounded-xl border border-border/60 bg-muted/10"
             dir={dir}
@@ -1319,29 +1902,30 @@ export function SettingsView() {
                         {c.name}
                       </span>
                     </div>
-                    <input
-                      id={`budget-${c.id}`}
-                      type="text"
-                      inputMode="decimal"
-                      dir="ltr"
-                      value={formatNumericInput(Number.isFinite(amount) ? String(amount) : "0")}
-                      onChange={(e) => {
-                        const raw = e.target.value;
-                        if (raw.trim() === "") {
-                          setBudget(c.id, 0);
-                          return;
-                        }
-                        const n = parseNumericInput(raw);
-                        if (n != null && Number.isFinite(n) && n >= 0) setBudget(c.id, n);
-                      }}
-                      aria-label={`${t.settingsBudgetLabel} — ${c.name}`}
-                      className={cn(
-                        "w-[6rem] shrink-0 rounded-md border-0 border-b border-transparent bg-transparent py-1.5 text-end text-sm tabular-nums text-foreground transition-colors",
-                        "placeholder:text-muted-foreground/50",
-                        "hover:bg-muted/30 hover:border-border/50",
-                        "focus:border-primary focus:bg-muted/30 focus:outline-none focus:ring-0",
-                      )}
-                    />
+                    <div className="flex items-center gap-1.5 rounded-md border border-border/60 bg-background/70 px-2 py-1">
+                      <Pencil className="size-3.5 text-muted-foreground" aria-hidden />
+                      <input
+                        id={`budget-${c.id}`}
+                        type="text"
+                        inputMode="decimal"
+                        dir="ltr"
+                        value={formatNumericInput(Number.isFinite(amount) ? String(amount) : "0")}
+                        onChange={(e) => {
+                          const raw = e.target.value;
+                          if (raw.trim() === "") {
+                            setBudget(c.id, 0);
+                            return;
+                          }
+                          const n = parseNumericInput(raw);
+                          if (n != null && Number.isFinite(n) && n >= 0) setBudget(c.id, n);
+                        }}
+                        aria-label={`${t.settingsBudgetLabel} — ${c.name}`}
+                        className={cn(
+                          "w-[6rem] shrink-0 border-0 bg-transparent py-0.5 text-end text-sm tabular-nums text-foreground",
+                          "placeholder:text-muted-foreground/50 focus:outline-none",
+                        )}
+                      />
+                    </div>
                   </div>
                 </li>
               );
@@ -1363,46 +1947,70 @@ export function SettingsView() {
             </div>
           ) : null}
           <p className="border-t border-border/50 px-4 py-3 text-sm leading-relaxed text-muted-foreground">
-            {t.settingsSaveNote}
+            {lang === "he" ? "השדות ברשימה ניתנים לעריכה ישירה." : "Rows are directly editable."}
           </p>
         </CardContent>
       </Card>
+      ) : null}
 
-      <Card className="border-destructive/40 shadow-none">
+      {activeTab === "data" ? (
+      <Card className="rounded-2xl border-destructive/40 bg-zinc-100 p-1 shadow-none dark:bg-zinc-900">
         <CardHeader className="space-y-1">
           <CardTitle className="text-base text-destructive">
             {t.settingsDangerZone}
           </CardTitle>
           <CardDescription>{t.settingsDangerZoneDesc}</CardDescription>
         </CardHeader>
-        <CardContent>
-          <AlertDialog>
-            <AlertDialogTrigger asChild>
-              <Button
-                type="button"
-                variant="destructive"
-                className="w-full sm:w-auto"
-              >
-                {t.clearAllData}
-              </Button>
-            </AlertDialogTrigger>
+        <CardContent className="flex justify-center">
+          <Button
+            type="button"
+            variant="destructive"
+            className="min-w-[12rem]"
+            onClick={() => setResetDataDialogOpen(true)}
+          >
+            {t.clearAllData}
+          </Button>
+          <AlertDialog open={resetDataDialogOpen} onOpenChange={setResetDataDialogOpen}>
             <AlertDialogContent>
               <AlertDialogHeader>
-                <AlertDialogTitle>האם אתה בטוח?</AlertDialogTitle>
+                <AlertDialogTitle>{t.resetDataDialogTitle}</AlertDialogTitle>
+                <AlertDialogDescription>{t.clearAllDataConfirm}</AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel>{t.cancel}</AlertDialogCancel>
+                <Button
+                  type="button"
+                  variant="destructive"
+                  onClick={() => void handleResetDataFirstConfirm()}
+                >
+                  {t.clearAllData}
+                </Button>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
+          <AlertDialog open={resetHouseholdWarnOpen} onOpenChange={setResetHouseholdWarnOpen}>
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle>{t.resetDataHouseholdWarningTitle}</AlertDialogTitle>
                 <AlertDialogDescription>
-                  פעולה זו תמחק את כל הנתונים ולא ניתנת לביטול.
+                  {t.resetDataHouseholdWarningDesc}
                 </AlertDialogDescription>
               </AlertDialogHeader>
               <AlertDialogFooter>
-                <AlertDialogCancel>ביטול</AlertDialogCancel>
-                <AlertDialogAction onClick={onClearAllData}>
-                  {t.clearAllData}
-                </AlertDialogAction>
+                <AlertDialogCancel>{t.cancel}</AlertDialogCancel>
+                <Button
+                  type="button"
+                  variant="destructive"
+                  onClick={() => void handleResetHouseholdFinalConfirm()}
+                >
+                  {t.resetDataHouseholdConfirmCta}
+                </Button>
               </AlertDialogFooter>
             </AlertDialogContent>
           </AlertDialog>
         </CardContent>
       </Card>
+      ) : null}
 
       <AlertDialog open={deleteOpen} onOpenChange={setDeleteOpen}>
         <AlertDialogContent>
@@ -1620,6 +2228,165 @@ export function SettingsView() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {importReview?.mode === "assets" ? (
+        <ImportReviewModal
+          key={importReview.sessionId}
+          mode="assets"
+          open
+          sessionId={importReview.sessionId}
+          onOpenChange={(o) => {
+            if (!o) setImportReview(null);
+          }}
+          dir={dir}
+          assetTypes={assetTypes}
+          initialRows={importReview.rows}
+          labels={{
+            title: t.importReviewTitleAssets,
+            ready: t.importReadySection,
+            attention: t.importAttentionSection,
+            confirm: t.importConfirm,
+            cancel: t.importCancel,
+            raw: t.importRaw,
+            mustFix: t.importMustFix,
+            noReady: t.importNoReady,
+            importing: t.importImporting,
+            issues: t.importIssues,
+            applyRow: t.importApplyRow,
+            editRow: t.importEditRow,
+            categoryLabel: lang === "he" ? "קטגוריה" : "Category",
+            accountLabel: lang === "he" ? "חשבון / יעד" : "Account / destination",
+          }}
+          onConfirm={async (rows) => {
+            try {
+              const payloads = rows
+                .map((r) => assetRowToPayload(r))
+                .filter((p): p is NonNullable<typeof p> => p != null);
+              const res = await bulkImportAssets(payloads);
+              if (res.ok) {
+                toast.success(importSuccessMessageAssets(res.count), {
+                  id: IMPORT_TOAST_ID.assets,
+                });
+                return { ok: true };
+              }
+              toast.error(res.error, { id: IMPORT_TOAST_ID.assets });
+              return { ok: false, error: res.error };
+            } catch (error) {
+              console.error("[Settings] asset import confirm crashed", error);
+              const msg = error instanceof Error ? error.message : "Asset import failed";
+              toast.error(msg, { id: IMPORT_TOAST_ID.assets });
+              return { ok: false, error: msg };
+            }
+          }}
+        />
+      ) : importReview?.mode === "incomes" ? (
+        <ImportReviewModal
+          key={importReview.sessionId}
+          mode="incomes"
+          open
+          sessionId={importReview.sessionId}
+          onOpenChange={(o) => {
+            if (!o) setImportReview(null);
+          }}
+          dir={dir}
+          incomeSources={incomeSources}
+          destinationAccounts={destinationAccounts}
+          currencyToCode={currencyToCode}
+          initialRows={importReview.rows}
+          labels={{
+            title: t.importReviewTitleIncomes,
+            ready: t.importReadySection,
+            attention: t.importAttentionSection,
+            confirm: t.importConfirm,
+            cancel: t.importCancel,
+            raw: t.importRaw,
+            mustFix: t.importMustFix,
+            noReady: t.importNoReady,
+            importing: t.importImporting,
+            issues: t.importIssues,
+            applyRow: t.importApplyRow,
+            editRow: t.importEditRow,
+            categoryLabel: lang === "he" ? "קטגוריית הכנסה" : "Income category",
+            accountLabel: lang === "he" ? "חשבון יעד" : "Destination account",
+          }}
+          onConfirm={async (rows) => {
+            try {
+              const inputs = rows
+                .map((r) => incomeRowToExpenseInput(r))
+                .filter((x): x is NonNullable<typeof x> => x != null);
+              const res = await bulkImportIncomes(inputs);
+              if (res.ok) {
+                toast.success(importSuccessMessageIncomes(res.count), {
+                  id: IMPORT_TOAST_ID.incomes,
+                });
+                return { ok: true };
+              }
+              toast.error(res.error, { id: IMPORT_TOAST_ID.incomes });
+              return { ok: false, error: res.error };
+            } catch (error) {
+              console.error("[Settings] income import confirm crashed", error);
+              const msg = error instanceof Error ? error.message : "Income import failed";
+              toast.error(msg, { id: IMPORT_TOAST_ID.incomes });
+              return { ok: false, error: msg };
+            }
+          }}
+        />
+      ) : importReview?.mode === "expenses" ? (
+        <ImportReviewModal
+          key={importReview.sessionId}
+          mode="expenses"
+          open
+          sessionId={importReview.sessionId}
+          onOpenChange={(o) => {
+            if (!o) setImportReview(null);
+          }}
+          dir={dir}
+          expenseCategories={expenseCategories}
+          paymentMethods={paymentMethods}
+          currencyToCode={currencyToCode}
+          initialRows={importReview.rows}
+          labels={{
+            title: lang === "he" ? "סקירת ייבוא — הוצאות" : "Review import — expenses",
+            ready: t.importReadySection,
+            attention: t.importAttentionSection,
+            confirm: t.importConfirm,
+            cancel: t.importCancel,
+            raw: t.importRaw,
+            mustFix: t.importMustFix,
+            noReady: t.importNoReady,
+            importing: t.importImporting,
+            issues: t.importIssues,
+            applyRow: t.importApplyRow,
+            editRow: t.importEditRow,
+            categoryLabel: lang === "he" ? "קטגוריית הוצאה" : "Expense category",
+            accountLabel: lang === "he" ? "אמצעי תשלום" : "Payment method",
+          }}
+          onConfirm={async (rows) => {
+            try {
+              const inputs = rows
+                .map((r) => incomeRowToExpenseInput(r))
+                .filter((x): x is NonNullable<typeof x> => x != null)
+                .map((x) => ({ ...x, type: "expense" as const }));
+              const res = await bulkImportExpenses(inputs);
+              if (res.ok) {
+                const msg =
+                  lang === "he"
+                    ? `הייבוא הושלם — נוספו ${res.count} רשומות הוצאה.`
+                    : `Import complete — added ${res.count} expense rows.`;
+                toast.success(msg, { id: IMPORT_TOAST_ID.expenses });
+                return { ok: true };
+              }
+              toast.error(res.error, { id: IMPORT_TOAST_ID.expenses });
+              return { ok: false, error: res.error };
+            } catch (error) {
+              console.error("[Settings] expense import confirm crashed", error);
+              const msg = error instanceof Error ? error.message : "Expense import failed";
+              toast.error(msg, { id: IMPORT_TOAST_ID.expenses });
+              return { ok: false, error: msg };
+            }
+          }}
+        />
+      ) : null}
     </div>
   );
 }

@@ -13,7 +13,7 @@ export const en = {
   themeToLight: "Switch to light mode",
   themeToDark: "Switch to dark mode",
 
-  expenseTitle: "New transaction",
+  expenseTitle: "Add expense / income",
   expenseSubtitle: "Quick entry — amount, category, payment method, and notes.",
   entryExpense: "Expense",
   entryIncome: "Income",
@@ -35,6 +35,14 @@ export const en = {
   note: "Notes",
   notePlaceholder: "Optional notes about this transaction",
   dateLabel: "Date",
+  receiptAttachmentLabel: "Receipt image (optional)",
+  receiptChooseFile: "Choose image",
+  receiptClear: "Remove",
+  receiptReplace: "Replace image",
+  receiptRemoveAria: "Remove receipt",
+  receiptViewAria: "View receipt image",
+  receiptDialogTitle: "Receipt",
+  receiptAddCompact: "Add receipt / photo",
   addExpense: "Save transaction",
   addCategory: "Add new category",
   addPaymentMethod: "Add payment method",
@@ -74,7 +82,6 @@ export const en = {
   chartPie: "Pie",
   chartToggleHint: "Toggle breakdown view",
   pieEmpty: "No data to display",
-  dashboardFooterNote: "Advanced charts and sync will be added with Supabase.",
   recentExpenses: "Recent transactions",
   recentEmpty: "No transactions for the selected month.",
   deleteExpense: "Delete transaction",
@@ -82,14 +89,27 @@ export const en = {
   dateInvalid: "Please choose a valid date.",
 
   historyTitle: "History",
+  historyToolbarFilters: "Filters",
   historyEmpty: "No transactions match the filter.",
   searchNotes: "Search notes",
   searchNotesPlaceholder: "Type to search…",
   allCategories: "All categories",
+  historyFilterPaymentLabel: "Payment · expenses",
+  historyFilterDestinationLabel: "Destination · income",
+  historyAllPaymentMethods: "All payment methods",
+  historyAllDestinationAccounts: "All destination accounts",
+  historyGroupIncome: "Income",
+  historyGroupExpense: "Expenses",
+  historySortLabel: "Sort",
+  historySortNewest: "Newest first",
+  historySortOldest: "Oldest first",
+  historySortAmountDesc: "Amount: high to low",
+  historySortAmountAsc: "Amount: low to high",
 
   editExpenseTitle: "Edit transaction",
   editExpenseSubtitle: "Update details or delete.",
   saveChanges: "Save",
+  saveInProgress: "Saving…",
   deleteExpenseFromDrawer: "Delete",
 
   trendsTitle: "Monthly trends",
@@ -108,6 +128,7 @@ export const en = {
   assetSnapshotBalance: "Balance",
   assetSnapshotCurrency: "Currency",
   assetAddButton: "Add asset",
+  assetNameRequired: "Please enter an asset name.",
   assetDefaultNameLiquid: "Liquid asset",
   assetDefaultNamePortfolio: "Investment portfolio",
   assetDefaultNamePension: "Pension saving",
@@ -125,6 +146,7 @@ export const en = {
   manageAssetTypesDesc: "Add, edit, and delete asset types.",
   addAssetType: "Add type",
   assetTypeNameLabel: "Type name",
+  assetTypeColorLabel: "Color (all assets of this type)",
   deleteAssetType: "Delete type",
   deleteAssetTypeConfirm: "Delete this asset type? Assets will be moved to the default type.",
 
@@ -138,6 +160,16 @@ export const en = {
   settingsBudgetsSectionDesc: "Set a monthly cap per category.",
   settingsBudgetLabel: "Monthly cap (₪)",
   settingsSaveNote: "Changes are saved automatically.",
+  settingsDefaultPaymentTitle: "Default payment method (expenses)",
+  settingsDefaultPaymentDesc:
+    "In a shared household, each person can choose which payment method is pre-selected on the entry screen (e.g. the card you use most).",
+  settingsDefaultPaymentNone: "None (first in list)",
+  settingsDefaultDestinationTitle: "Default destination account (income)",
+  settingsDefaultDestinationDesc:
+    "In a shared household, each person can choose which account is pre-selected for new income on the entry screen.",
+  manageMethodsSetAsDefault: "Set as default",
+  manageMethodsIsDefault: "Default",
+  manageMethodsDefaultSaved: "Saved as default",
 
   installAppSectionTitle: "Install on your device",
   installAppSectionDesc:
@@ -150,13 +182,13 @@ export const en = {
   installAppInstructionsLead: "Instructions by browser:",
   installAppChromeSectionTitle: "Chrome / Android",
   installAppChromeBullet1:
-    "On this screen, tap “Install app” (below the Guidelines button).",
+    "1 On this screen, tap “Install app” (below the Guidelines button).",
   installAppChromeBullet2:
-    "If nothing appears, open the browser menu (⋮) and choose “Install app”.",
+    "2 If nothing appears, open the browser menu (⋮) and choose “Install app”.",
   installAppSafariSectionTitle: "Safari / iPhone (iOS)",
   installAppSafariBullet1:
-    "Tap the Share icon (square with an arrow) in the toolbar.",
-  installAppSafariBullet2: "Scroll down and choose “Add to Home Screen”.",
+    "1 Tap the Share icon (square with an arrow) in the toolbar.",
+  installAppSafariBullet2: "2 Scroll down and choose “Add to Home Screen”.",
   installAppAlreadyInstalled: "You’re already using the app in full-screen mode.",
   installAppDesktopHint:
     "On desktop: use your browser menu (Chrome / Edge) to install the app or create a shortcut.",
@@ -167,6 +199,13 @@ export const en = {
   clearAllData: "Clear all data",
   clearAllDataConfirm: "Delete all app data? This cannot be undone.",
   clearAllDataSuccess: "All data was deleted successfully",
+  resetDataDialogTitle: "Are you sure?",
+  resetDataHouseholdWarningTitle: "Shared household",
+  resetDataHouseholdWarningDesc:
+    "Warning: this will delete data for all members of the shared household. This cannot be undone.",
+  resetDataHouseholdConfirmCta: "Delete data for everyone",
+
+  installAppIosOnlyIntro: "On iPhone or iPad, add the app from Safari:",
 
   manageCategories: "Manage categories",
   manageCategoriesDesc: "Edit/delete categories and their icons (stored locally).",
@@ -216,6 +255,29 @@ export const en = {
 
   exportCsvDownload: "Export CSV",
 
+  dataManagementTitle: "Data management",
+  dataManagementDesc:
+    "Import assets and incomes from CSV or Excel. Data is reviewed before it is saved — nothing is imported silently.",
+  importAssets: "Import assets",
+  importIncomes: "Import incomes",
+  importExampleFormat: "Example format — download template",
+  importReviewTitleAssets: "Review import — assets",
+  importReviewTitleIncomes: "Review import — incomes",
+  importReadySection: "Ready to import",
+  importAttentionSection: "Requires attention",
+  importConfirm: "Confirm & import",
+  importCancel: "Cancel",
+  importRaw: "Raw data",
+  importMustFix: "Fix every row under “Requires attention” before importing.",
+  importNoReady: "No rows are ready to import.",
+  importImporting: "Importing…",
+  importIssues: "Issues",
+  importApplyRow: "Apply row edit",
+  importEditRow: "Edit",
+  importSuccessAssets: "Import complete — added {{count}} asset rows.",
+  importSuccessIncomes: "Import complete — added {{count}} income rows.",
+  importParseError: "Could not read the file. Try CSV or Excel format.",
+
   assetBalanceEntryMonth: "Balance entry date",
   assetChartFilterTypes: "Include in chart",
   assetChartFilterAssets: "Specific assets",
@@ -224,6 +286,7 @@ export const en = {
   assetChartRangeEnd: "To",
   assetChartView: "Chart view",
   assetListView: "List view",
+  assetTrendModeGroup: "Total net worth vs. specific assets",
 
   verifiedAriaVerified: "Verified — click to mark unverified",
   verifiedAriaUnverified: "Unverified — click to verify",

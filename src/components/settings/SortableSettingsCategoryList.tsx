@@ -3,6 +3,7 @@ import {
   type DragEndEvent,
   KeyboardSensor,
   PointerSensor,
+  TouchSensor,
   closestCenter,
   useSensor,
   useSensors,
@@ -49,7 +50,8 @@ function SortableRow({
   const handle = (
     <button
       type="button"
-      className="inline-flex shrink-0 rounded-md p-1 text-muted-foreground hover:bg-muted/60 hover:text-foreground"
+      className="inline-flex shrink-0 touch-none rounded-md p-1 text-muted-foreground hover:bg-muted/60 hover:text-foreground"
+      style={{ touchAction: "none" }}
       aria-label={dragLabel}
       {...attributes}
       {...listeners}
@@ -97,6 +99,9 @@ export function SortableSettingsCategoryList({
   const sensors = useSensors(
     useSensor(PointerSensor, {
       activationConstraint: { distance: 6 },
+    }),
+    useSensor(TouchSensor, {
+      activationConstraint: { delay: 200, tolerance: 5 },
     }),
     useSensor(KeyboardSensor, {
       coordinateGetter: sortableKeyboardCoordinates,

@@ -10,11 +10,14 @@ import {
 import { DEFAULT_CATEGORY_BUDGETS } from "@/data/mock";
 import { useAuth } from "@/context/AuthContext";
 import { supabase } from "@/lib/supabase";
+import { toast } from "sonner";
 
 type BudgetContextValue = {
   budgets: Record<string, number>;
   getBudget: (categoryId: string) => number;
   setBudget: (categoryId: string, amount: number) => void;
+  getMonthlyBudgetTotal: () => number;
+  setMonthlyBudgetTotal: (amount: number) => Promise<boolean>;
   /**
    * When an expense category is removed: drop its budget entry.
    * If moveToCategoryId is set (user reassigned transactions), merge that budget into the target.
@@ -28,6 +31,7 @@ type BudgetContextValue = {
 };
 
 const BudgetContext = createContext<BudgetContextValue | null>(null);
+const MONTHLY_TOTAL_KEY = "__monthly_total__";
 
 export function BudgetProvider({ children }: { children: ReactNode }) {
   const { profile } = useAuth();
@@ -68,6 +72,27 @@ export function BudgetProvider({ children }: { children: ReactNode }) {
       return updated;
     });
   }, [profile?.household_id]);
+
+  const getMonthlyBudgetTotal = useCallback(
+    () => budgets[MONTHLY_TOTAL_KEY] ?? 0,
+    [budgets],
+  );
+
+  const setMonthlyBudgetTotal = useCallback(async (amount: number) => {
+    const next = Math.max(0, Math.round(amount * 100) / 100);
+    const updated = { ...budgets, [MONTHLY_TOTAL_KEY]: next };
+    setBudgets(updated);
+    if (!profile?.household_id) return false;
+    const { error } = await supabase.from("settings").upsert({
+      household_id: profile.household_id,
+      budget_limits: updated,
+    });
+    if (error) {
+      toast.error("שמירת התקציב החודשי נכשלה");
+      return false;
+    }
+    return true;
+  }, [profile?.household_id, budgets]);
 
   const mergeBudgetOnExpenseCategoryDeleted = useCallback(
     (deletedCategoryId: string, moveToCategoryId?: string) => {
@@ -114,10 +139,20 @@ export function BudgetProvider({ children }: { children: ReactNode }) {
       budgets,
       getBudget,
       setBudget,
+      getMonthlyBudgetTotal,
+      setMonthlyBudgetTotal,
       mergeBudgetOnExpenseCategoryDeleted,
       clearAllUserData,
     }),
-    [budgets, getBudget, setBudget, mergeBudgetOnExpenseCategoryDeleted, clearAllUserData],
+    [
+      budgets,
+      getBudget,
+      setBudget,
+      getMonthlyBudgetTotal,
+      setMonthlyBudgetTotal,
+      mergeBudgetOnExpenseCategoryDeleted,
+      clearAllUserData,
+    ],
   );
 
   return (

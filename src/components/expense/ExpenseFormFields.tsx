@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
-import { Plus, GripVertical } from "lucide-react";
+import { Plus, GripVertical, Star } from "lucide-react";
 import {
   DndContext,
   type DragEndEvent,
   KeyboardSensor,
   PointerSensor,
+  TouchSensor,
   closestCenter,
   useSensor,
   useSensors,
@@ -47,6 +48,13 @@ import { useI18n } from "@/context/I18nContext";
 import { currencyOptionLabel, formatIls } from "@/lib/format";
 import { ColorBadge } from "./ColorBadge";
 import { useExpenses } from "@/context/ExpensesContext";
+import { useAuth } from "@/context/AuthContext";
+import {
+  localizedExpenseCategoryName,
+  localizedIncomeSourceName,
+  localizedPaymentMethodName,
+  localizedDestinationAccountName,
+} from "@/lib/defaultEntityLabels";
 import { cn } from "@/lib/utils";
 import { reorderFirstBlock } from "@/lib/reorderCategoryIds";
 
@@ -59,12 +67,14 @@ function SortableGridCategoryTile({
   id,
   jiggle,
   dragLabel,
+  active,
   accentStyle,
   children,
 }: {
   id: string;
   jiggle?: boolean;
   dragLabel: string;
+  active?: boolean;
   accentStyle?: CSSProperties;
   children: ReactNode;
 }) {
@@ -88,13 +98,17 @@ function SortableGridCategoryTile({
       ref={setNodeRef}
       style={style}
       className={cn(
-        "relative flex min-h-[4.5rem] flex-col rounded-xl border border-border/70 bg-background px-2 py-3 text-center",
+        "relative flex min-h-[4.5rem] flex-col rounded-xl border-2 border-transparent bg-zinc-50 px-2 py-3 text-center shadow-sm",
+        "text-zinc-900 dark:bg-zinc-800 dark:text-zinc-50",
+        active &&
+          "z-[1] shadow-lg ring-[3px] ring-black ring-offset-[3px] ring-offset-background dark:ring-white dark:ring-offset-background",
         jiggle && "entry-category-grid-wiggle",
       )}
     >
       <button
         type="button"
-        className="absolute start-1 top-1 z-10 rounded-md bg-background/95 p-0.5 shadow-sm ring-1 ring-border/40"
+        className="absolute start-1 top-1 z-10 touch-none rounded-md bg-background/95 p-0.5 shadow-sm ring-1 ring-border/40"
+        style={{ touchAction: "none" }}
         aria-label={dragLabel}
         {...attributes}
         {...listeners}
@@ -142,7 +156,8 @@ function SortableDialogCategoryRow({
     >
       <button
         type="button"
-        className="shrink-0 rounded-md p-1 text-muted-foreground hover:bg-muted/60"
+        className="shrink-0 touch-none rounded-md p-1 text-muted-foreground hover:bg-muted/60"
+        style={{ touchAction: "none" }}
         aria-label={dragLabel}
         {...attributes}
         {...listeners}
@@ -196,6 +211,10 @@ export type ExpenseFormFieldsProps = {
   layout?: "form" | "list";
   /** Entry screen can show a category grid instead of a dropdown. */
   categoryPicker?: "select" | "grid";
+  /** Entry screen: monochrome minimalist card styling (zinc, light + dark). */
+  entrySurface?: "default" | "monochrome";
+  /** Rendered below notes (e.g. receipt attachments on entry). */
+  entryNotesExtra?: ReactNode;
 };
 
 export function ExpenseFormFields({
@@ -235,9 +254,25 @@ export function ExpenseFormFields({
   showAmountCurrency = true,
   layout = "form",
   categoryPicker = "select",
+  entrySurface = "default",
+  entryNotesExtra,
 }: ExpenseFormFieldsProps) {
   const { expenses } = useExpenses();
-  const { t, dir } = useI18n();
+  const { profile } = useAuth();
+  const { t, dir, lang } = useI18n();
+  const entryMono = entrySurface === "monochrome";
+
+  const profileDefaultMethodRowId = useMemo(() => {
+    const id =
+      entryType === "income"
+        ? profile?.default_destination_account_id?.trim()
+        : profile?.default_payment_method_id?.trim();
+    return id || "";
+  }, [
+    entryType,
+    profile?.default_destination_account_id,
+    profile?.default_payment_method_id,
+  ]);
 
   const currencyOptions = useMemo(() => {
     const list = [...currencies];
@@ -280,6 +315,22 @@ export function ExpenseFormFields({
 
   const quickCount = Math.max(1, Math.min(8, Math.floor(quickAccessCount)));
 
+  const categoryDisplayName = useCallback(
+    (c: Category) =>
+      entryType === "income"
+        ? localizedIncomeSourceName(c.id, c.name, lang)
+        : localizedExpenseCategoryName(c.id, c.name, lang),
+    [entryType, lang],
+  );
+
+  const methodDisplayName = useCallback(
+    (m: PaymentMethod) =>
+      entryType === "income"
+        ? localizedDestinationAccountName(m.id, m.name, lang)
+        : localizedPaymentMethodName(m.id, m.name, lang),
+    [entryType, lang],
+  );
+
   const categoryGridTop = useMemo(() => {
     // Keep this grid strictly aligned with the user's custom category order.
     return categoryOptionsResolved.slice(0, quickCount);
@@ -290,6 +341,9 @@ export function ExpenseFormFields({
   const sensors = useSensors(
     useSensor(PointerSensor, {
       activationConstraint: { distance: 8 },
+    }),
+    useSensor(TouchSensor, {
+      activationConstraint: { delay: 200, tolerance: 5 },
     }),
     useSensor(KeyboardSensor, {
       coordinateGetter: sortableKeyboardCoordinates,
@@ -457,7 +511,16 @@ export function ExpenseFormFields({
   }
 
   /** Shared padding for Entry/Edit list rows (category, payment, date row, notes, installments). */
-  const rowPad = "px-5 py-5";
+  const rowPad = entryMono ? "px-0 py-3" : "px-5 py-5";
+  const monoSelect = entryMono
+    ? cn(
+        "border-0 border-b border-border bg-transparent shadow-none rounded-none ring-0 ring-offset-0",
+        "focus:ring-0 focus:ring-offset-0 data-[state=open]:ring-0",
+        "text-foreground [&>span]:text-foreground",
+      )
+    : "";
+  const monoRowMuted = "text-muted-foreground";
+  const monoRowValue = "text-foreground";
 
   const Row = ({
     children,
@@ -480,7 +543,14 @@ export function ExpenseFormFields({
   if (layout === "list") {
     const renderCategoryGrid = categoryPicker === "grid";
     return (
-      <div className="w-full overflow-hidden rounded-2xl border border-border/70 bg-background p-0">
+      <div
+        className={cn(
+          "w-full overflow-hidden",
+          entryMono
+            ? "rounded-xl border border-border bg-card p-4 shadow-inner backdrop-blur-sm"
+            : "rounded-2xl border border-border/70 bg-background p-0",
+        )}
+      >
         {showDate && onDateChange ? (
           <>
             <DatePickerField
@@ -488,10 +558,10 @@ export function ExpenseFormFields({
               label={t.dateLabel}
               value={date}
               onChange={onDateChange}
-              variant="row"
+              variant={entryMono ? "entryMonochrome" : "row"}
               hideLabel
             />
-            <div className="h-px w-full bg-border/70" />
+            {!entryMono ? <div className="h-px w-full bg-border/70" /> : null}
           </>
         ) : null}
 
@@ -564,18 +634,21 @@ export function ExpenseFormFields({
                               key={c.id}
                               id={c.id}
                               jiggle
+                              active={active}
                               dragLabel={dragLabelGrid}
                               accentStyle={{
-                                backgroundImage: `linear-gradient(180deg, ${c.color}1A, transparent)`,
-                                borderColor: active ? undefined : `${c.color}55`,
+                                backgroundImage: active
+                                  ? `linear-gradient(180deg, ${c.color}73, ${c.color}3D)`
+                                  : `linear-gradient(180deg, ${c.color}5C, ${c.color}1F)`,
+                                borderColor: active ? c.color : `${c.color}CC`,
                               }}
                             >
                               <CategoryGlyph
                                 iconKey={c.iconKey}
-                                className="size-5 text-foreground"
+                                className="size-5 text-zinc-900 dark:text-zinc-50"
                               />
-                              <span className="w-full truncate text-sm leading-relaxed text-foreground">
-                                {c.name}
+                              <span className="w-full truncate text-sm font-medium leading-relaxed text-zinc-900 dark:text-zinc-50">
+                                {categoryDisplayName(c)}
                               </span>
                             </SortableGridCategoryTile>
                           );
@@ -593,19 +666,23 @@ export function ExpenseFormFields({
                           type="button"
                           onClick={() => onCategoryIdChange(c.id)}
                           className={cn(
-                            "flex flex-col items-center justify-center gap-2 rounded-xl border border-border/70 bg-background px-2 py-3 text-center transition-colors",
-                            "hover:bg-accent/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                            active && "border-primary/40 bg-muted/30",
+                            "flex flex-col items-center justify-center gap-2 rounded-xl border-2 border-transparent px-2 py-3 text-center transition-colors",
+                            "bg-zinc-50 text-zinc-900 shadow-sm dark:bg-zinc-800 dark:text-zinc-50",
+                            "hover:bg-zinc-100/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring dark:hover:bg-zinc-700/90",
+                            active &&
+                              "z-[1] shadow-lg ring-[3px] ring-black ring-offset-[3px] ring-offset-background dark:ring-white dark:ring-offset-background",
                           )}
                           style={{
-                            backgroundImage: `linear-gradient(180deg, ${c.color}1A, transparent)`,
-                            borderColor: active ? undefined : `${c.color}55`,
+                            backgroundImage: active
+                              ? `linear-gradient(180deg, ${c.color}73, ${c.color}3D)`
+                              : `linear-gradient(180deg, ${c.color}5C, ${c.color}1F)`,
+                            borderColor: active ? c.color : `${c.color}CC`,
                           }}
                           aria-pressed={active}
                         >
-                          <CategoryGlyph iconKey={c.iconKey} className="size-5 text-foreground" />
-                          <span className="w-full truncate text-sm leading-relaxed text-foreground">
-                            {c.name}
+                          <CategoryGlyph iconKey={c.iconKey} className="size-5 text-zinc-900 dark:text-zinc-50" />
+                          <span className="w-full truncate text-sm font-medium leading-relaxed text-zinc-900 dark:text-zinc-50">
+                            {categoryDisplayName(c)}
                           </span>
                         </button>
                       );
@@ -617,8 +694,8 @@ export function ExpenseFormFields({
                     <button
                       type="button"
                       className={cn(
-                        "flex flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-border/70 bg-background px-2 py-3 text-center transition-colors",
-                        "hover:bg-accent/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                        "flex flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed border-border/70 bg-zinc-50 px-2 py-3 text-center transition-colors",
+                        "text-muted-foreground hover:bg-zinc-100/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring dark:bg-zinc-800/80 dark:hover:bg-zinc-700/80",
                       )}
                     >
                       <span className="text-base leading-relaxed text-muted-foreground">עוד...</span>
@@ -651,7 +728,9 @@ export function ExpenseFormFields({
                                 <div className="flex w-full items-center gap-2 text-start">
                                   <CategoryGlyph iconKey={c.iconKey} className="size-4" />
                                   <ColorBadge color={c.color} />
-                                  <span className="truncate text-base leading-relaxed">{c.name}</span>
+                                  <span className="truncate text-base leading-relaxed">
+                                    {categoryDisplayName(c)}
+                                  </span>
                                 </div>
                               </SortableDialogCategoryRow>
                             ))}
@@ -687,12 +766,15 @@ export function ExpenseFormFields({
                             className={cn(
                               "flex w-full items-center gap-2 rounded-lg border border-border/70 px-3 py-2 text-start transition-colors",
                               "hover:bg-accent/40",
-                              c.id === categoryId && "bg-muted/30",
+                              c.id === categoryId &&
+                                "border-black/35 bg-black/[0.06] ring-[3px] ring-black ring-offset-[3px] ring-offset-background dark:border-white/40 dark:bg-white/10 dark:ring-white dark:ring-offset-background",
                             )}
                           >
                             <CategoryGlyph iconKey={c.iconKey} className="size-4" />
                             <ColorBadge color={c.color} />
-                            <span className="truncate text-base leading-relaxed">{c.name}</span>
+                            <span className="truncate text-base leading-relaxed">
+                              {categoryDisplayName(c)}
+                            </span>
                           </button>
                         ))}
                       </div>
@@ -711,7 +793,7 @@ export function ExpenseFormFields({
                 </Dialog>
               </div>
             </div>
-            <div className="h-px w-full bg-border/70" />
+            {!entryMono ? <div className="h-px w-full bg-border/70" /> : null}
           </>
         ) : (
           <>
@@ -721,10 +803,11 @@ export function ExpenseFormFields({
                 className={cn(
                   "h-auto w-full min-h-[3.5rem] rounded-none border-0 bg-transparent text-base leading-relaxed",
                   rowPad,
+                  monoSelect,
                 )}
               >
                 <div className="flex w-full min-w-0 items-center justify-between gap-3">
-                  <div className="flex min-w-0 items-center gap-2 text-muted-foreground">
+                  <div className={cn("flex min-w-0 items-center gap-2", monoRowMuted)}>
                     {selectedCategory ? (
                       <>
                         <CategoryGlyph iconKey={selectedCategory.iconKey} className="size-4" />
@@ -740,32 +823,47 @@ export function ExpenseFormFields({
                   <div
                     className={cn(
                       "min-w-0 truncate",
-                      selectedCategory ? "text-foreground" : "text-muted-foreground",
+                      selectedCategory ? monoRowValue : monoRowMuted,
                     )}
                   >
-                    {selectedCategory?.name ??
-                      (entryType === "income"
+                    {selectedCategory
+                      ? categoryDisplayName(selectedCategory)
+                      : entryType === "income"
                         ? t.incomeSourcePlaceholder
-                        : t.categoryPlaceholder)}
+                        : t.categoryPlaceholder}
                   </div>
                 </div>
               </SelectTrigger>
-              <SelectContent position="popper">
+              <SelectContent
+                position="popper"
+                className={cn(
+                  entryMono && "border-border bg-popover text-popover-foreground",
+                )}
+              >
                 {categoryOptionsResolved.map((c) => (
-                  <SelectItem key={c.id} value={c.id} textValue={c.name}>
+                  <SelectItem
+                    key={c.id}
+                    value={c.id}
+                    textValue={categoryDisplayName(c)}
+                  >
                     <span className="flex items-center gap-2">
                       <CategoryGlyph iconKey={c.iconKey} />
                       <ColorBadge color={c.color} />
-                      <SelectItemText>{c.name}</SelectItemText>
+                      <SelectItemText>{categoryDisplayName(c)}</SelectItemText>
                     </span>
                   </SelectItem>
                 ))}
-                <SelectSeparator />
+                <SelectSeparator className={cn(entryMono && "bg-border")} />
                 <SelectItem
                   value={ADD_CATEGORY}
                   textValue={entryType === "income" ? t.addIncomeSource : t.addCategory}
                 >
-                  <span className="flex items-center gap-2 text-muted-foreground">
+                  <span
+                    className={cn(
+                      "flex items-center gap-2",
+                      entryMono ? "text-zinc-500 dark:text-zinc-400" : "text-muted-foreground",
+                    )}
+                  >
                     <SelectItemText>
                       {entryType === "income" ? t.addIncomeSource : t.addCategory}
                     </SelectItemText>
@@ -774,7 +872,7 @@ export function ExpenseFormFields({
                 </SelectItem>
               </SelectContent>
             </Select>
-            <div className="h-px w-full bg-border/70" />
+            {!entryMono ? <div className="h-px w-full bg-border/70" /> : null}
           </>
         )}
 
@@ -784,10 +882,11 @@ export function ExpenseFormFields({
             className={cn(
               "h-auto w-full min-h-[3.5rem] rounded-none border-0 bg-transparent text-base leading-relaxed",
               rowPad,
+              monoSelect,
             )}
           >
             <div className="flex w-full min-w-0 items-center justify-between gap-3">
-              <div className="flex min-w-0 items-center gap-2 text-muted-foreground">
+              <div className={cn("flex min-w-0 items-center gap-2", monoRowMuted)}>
                 {selectedMethod ? (
                   <>
                     <CategoryGlyph iconKey={selectedMethod.iconKey} className="size-4" />
@@ -803,27 +902,54 @@ export function ExpenseFormFields({
               <div
                 className={cn(
                   "min-w-0 truncate",
-                  selectedMethod ? "text-foreground" : "text-muted-foreground",
+                  selectedMethod ? monoRowValue : monoRowMuted,
                 )}
               >
-                {selectedMethod?.name ??
-                  (entryType === "income"
+                {selectedMethod
+                  ? methodDisplayName(selectedMethod)
+                  : entryType === "income"
                     ? t.destinationAccountPlaceholder
-                    : t.paymentPlaceholder)}
+                    : t.paymentPlaceholder}
               </div>
             </div>
           </SelectTrigger>
-          <SelectContent position="popper">
-            {methodsResolved.map((m) => (
-              <SelectItem key={m.id} value={m.id} textValue={m.name}>
-                <span className="flex items-center gap-2">
-                  <CategoryGlyph iconKey={m.iconKey} className="size-4" />
-                  <ColorBadge color={m.color} />
-                  <SelectItemText>{m.name}</SelectItemText>
-                </span>
-              </SelectItem>
-            ))}
-            <SelectSeparator />
+          <SelectContent
+            position="popper"
+            className={cn(entryMono && "border-border bg-popover text-popover-foreground")}
+          >
+            {methodsResolved.map((m) => {
+              const showProfileDefault =
+                !!profileDefaultMethodRowId && m.id === profileDefaultMethodRowId;
+              return (
+                <SelectItem
+                  key={m.id}
+                  value={m.id}
+                  textValue={
+                    showProfileDefault
+                      ? `${methodDisplayName(m)} (${t.manageMethodsIsDefault})`
+                      : methodDisplayName(m)
+                  }
+                >
+                  <span className="flex w-full min-w-0 items-center gap-2">
+                    <CategoryGlyph iconKey={m.iconKey} className="size-4" />
+                    <ColorBadge color={m.color} />
+                    <SelectItemText className="min-w-0 flex-1">
+                      {methodDisplayName(m)}
+                    </SelectItemText>
+                    {showProfileDefault ? (
+                      <span
+                        className="ms-auto inline-flex shrink-0"
+                        title={t.manageMethodsIsDefault}
+                        aria-hidden
+                      >
+                        <Star className="size-3.5 fill-amber-400 text-amber-500 dark:fill-amber-300 dark:text-amber-400" />
+                      </span>
+                    ) : null}
+                  </span>
+                </SelectItem>
+              );
+            })}
+            <SelectSeparator className={cn(entryMono && "bg-border")} />
             <SelectItem
               value={ADD_METHOD}
               textValue={entryType === "income" ? t.addDestinationAccount : t.addPaymentMethod}
@@ -839,7 +965,7 @@ export function ExpenseFormFields({
               ? onManageDestinationAccounts
               : onManagePaymentMethods) ? (
               <>
-                <SelectSeparator />
+                <SelectSeparator className={cn(entryMono && "bg-border")} />
                 <SelectItem value={MANAGE_METHOD} textValue="manage">
                   <span className="flex items-center gap-2 text-muted-foreground">
                     <SelectItemText>
@@ -851,7 +977,7 @@ export function ExpenseFormFields({
             ) : null}
           </SelectContent>
         </Select>
-        <div className="h-px w-full bg-border/70" />
+        {!entryMono ? <div className="h-px w-full bg-border/70" /> : null}
 
         {entryType === "expense" && onInstallmentsChange && !recurringMonthly ? (
           <>
@@ -863,11 +989,11 @@ export function ExpenseFormFields({
                   onClick={() => setInstallmentsOpen(true)}
                 >
                   <Row>
-                    <div className="flex min-w-0 items-center gap-2 text-muted-foreground">
+                    <div className={cn("flex min-w-0 items-center gap-2", monoRowMuted)}>
                       <span className="size-4 shrink-0 rounded-sm border border-border/70 bg-muted/40" />
                       <span className="truncate">{t.installments}</span>
                     </div>
-                    <div className="min-w-0 truncate text-foreground">
+                    <div className={cn("min-w-0 truncate", monoRowValue)}>
                       <span dir="ltr" className="tabular-nums">
                         {String(Math.floor(installments))}
                       </span>
@@ -923,14 +1049,14 @@ export function ExpenseFormFields({
                 </div>
               </PopoverContent>
             </Popover>
-            <div className="h-px w-full bg-border/70" />
+            {!entryMono ? <div className="h-px w-full bg-border/70" /> : null}
           </>
         ) : null}
 
         {onRecurringMonthlyChange ? (
           <>
             <Row>
-              <span className="text-base leading-relaxed text-muted-foreground">
+              <span className={cn("text-base leading-relaxed", monoRowMuted)}>
                 {entryType === "income" ? t.recurringIncome : t.recurringExpense}
               </span>
               <Switch
@@ -943,7 +1069,7 @@ export function ExpenseFormFields({
                 }}
               />
             </Row>
-            <div className="h-px w-full bg-border/70" />
+            {!entryMono ? <div className="h-px w-full bg-border/70" /> : null}
           </>
         ) : null}
 
@@ -955,11 +1081,11 @@ export function ExpenseFormFields({
               onClick={() => setNotePopoverOpen(true)}
             >
               <Row>
-                <div className="flex min-w-0 items-center gap-2 text-muted-foreground">
+                <div className={cn("flex min-w-0 items-center gap-2", monoRowMuted)}>
                   <span className="size-4 shrink-0 rounded-sm border border-border/70 bg-muted/40" />
                   <span className="truncate">{t.note}</span>
                 </div>
-                <div className="min-w-0 truncate text-foreground">
+                <div className={cn("min-w-0 truncate", monoRowValue)}>
                   {note.trim() ? note.trim() : t.notePlaceholder}
                 </div>
               </Row>
@@ -1019,6 +1145,16 @@ export function ExpenseFormFields({
             </div>
           </PopoverContent>
         </Popover>
+        {entryNotesExtra ? (
+          <div
+            className={cn(
+              "mt-4",
+              entryMono && "border-t border-border pt-4",
+            )}
+          >
+            {entryNotesExtra}
+          </div>
+        ) : null}
       </div>
     );
   }
@@ -1113,11 +1249,15 @@ export function ExpenseFormFields({
           </SelectTrigger>
           <SelectContent position="popper">
             {categoryOptionsResolved.map((c) => (
-              <SelectItem key={c.id} value={c.id} textValue={c.name}>
+              <SelectItem
+                key={c.id}
+                value={c.id}
+                textValue={categoryDisplayName(c)}
+              >
                 <span className="flex items-center gap-2">
                   <CategoryGlyph iconKey={c.iconKey} />
                   <ColorBadge color={c.color} />
-                  <SelectItemText>{c.name}</SelectItemText>
+                  <SelectItemText>{categoryDisplayName(c)}</SelectItemText>
                 </span>
               </SelectItem>
             ))}
@@ -1160,15 +1300,38 @@ export function ExpenseFormFields({
             </div>
           </SelectTrigger>
           <SelectContent position="popper">
-            {methodsResolved.map((m) => (
-              <SelectItem key={m.id} value={m.id} textValue={m.name}>
-                <span className="flex items-center gap-2">
-                  <CategoryGlyph iconKey={m.iconKey} className="size-4" />
-                  <ColorBadge color={m.color} />
-                  <SelectItemText>{m.name}</SelectItemText>
-                </span>
-              </SelectItem>
-            ))}
+            {methodsResolved.map((m) => {
+              const showProfileDefault =
+                !!profileDefaultMethodRowId && m.id === profileDefaultMethodRowId;
+              return (
+                <SelectItem
+                  key={m.id}
+                  value={m.id}
+                  textValue={
+                    showProfileDefault
+                      ? `${methodDisplayName(m)} (${t.manageMethodsIsDefault})`
+                      : methodDisplayName(m)
+                  }
+                >
+                  <span className="flex w-full min-w-0 items-center gap-2">
+                    <CategoryGlyph iconKey={m.iconKey} className="size-4" />
+                    <ColorBadge color={m.color} />
+                    <SelectItemText className="min-w-0 flex-1">
+                      {methodDisplayName(m)}
+                    </SelectItemText>
+                    {showProfileDefault ? (
+                      <span
+                        className="ms-auto inline-flex shrink-0"
+                        title={t.manageMethodsIsDefault}
+                        aria-hidden
+                      >
+                        <Star className="size-3.5 fill-amber-400 text-amber-500 dark:fill-amber-300 dark:text-amber-400" />
+                      </span>
+                    ) : null}
+                  </span>
+                </SelectItem>
+              );
+            })}
             <SelectSeparator />
             <SelectItem
               value={ADD_METHOD}

@@ -1,25 +1,66 @@
 <!doctype html>
-<html lang="he" dir="rtl" class="dark">
+<html lang="he" dir="rtl">
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/png" href="/icon.png" />
     <link rel="apple-touch-icon" href="/icon.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-    <meta name="theme-color" content="#0a0a0b" />
+    <meta name="theme-color" content="#09090b" />
     <meta name="description" content="מעקב הוצאות — Expandy" />
     <link rel="manifest" href="/manifest.json" />
-    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="apple-mobile-web-app-title" content="Expandy" />
+    <!-- iOS standalone splash (sizes are hints; inline #inline-splash covers first paint) -->
+    <link
+      rel="apple-touch-startup-image"
+      href="/logo-internal.png"
+      media="(device-width: 430px) and (device-height: 932px) and (-webkit-device-pixel-ratio: 3)"
+    />
+    <link
+      rel="apple-touch-startup-image"
+      href="/logo-internal.png"
+      media="(device-width: 393px) and (device-height: 852px) and (-webkit-device-pixel-ratio: 3)"
+    />
+    <link
+      rel="apple-touch-startup-image"
+      href="/logo-internal.png"
+      media="(device-width: 390px) and (device-height: 844px) and (-webkit-device-pixel-ratio: 3)"
+    />
+    <link rel="apple-touch-startup-image" href="/logo-internal.png" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
       href="https://fonts.googleapis.com/css2?family=Rubik:wght@400;500;600;700&display=swap"
       rel="stylesheet"
     />
-    <title>Expandy</title>
+    <title>הוספת הוצאה / הכנסה</title>
+    <style id="inline-splash-css">
+      #inline-splash {
+        position: fixed;
+        inset: 0;
+        z-index: 2147483646;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        margin: 0;
+        padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom)
+          env(safe-area-inset-left);
+        background-color: #09090b;
+      }
+      #inline-splash img {
+        width: min(48vw, 14rem);
+        height: auto;
+        max-height: min(40vh, 14rem);
+        object-fit: contain;
+        filter: drop-shadow(0 12px 40px rgba(0, 0, 0, 0.55));
+      }
+    </style>
   </head>
   <body>
+    <div id="inline-splash" aria-hidden="true">
+      <img src="/logo-internal.png" alt="" width="512" height="512" decoding="async" fetchpriority="high" />
+    </div>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

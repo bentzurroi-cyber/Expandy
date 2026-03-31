@@ -32,7 +32,10 @@ import { CategoryGlyph } from "@/components/expense/FinanceGlyphs";
 import { IconPicker } from "@/components/settings/IconPicker";
 import { ColorBadge } from "@/components/expense/ColorBadge";
 import { useI18n } from "@/context/I18nContext";
+import { useAuth } from "@/context/AuthContext";
+import { supabase } from "@/lib/supabase";
 import type { PaymentMethod } from "@/data/mock";
+import { toast } from "sonner";
 
 type Kind = "payment" | "destination";
 
@@ -47,7 +50,6 @@ type Props = {
   onUpdate: (id: string, patch: { name?: string; iconKey?: string; color?: string }) => void;
   onDelete: (id: string, moveToId?: string) => void;
   usageCount: Map<string, number>;
-  builtInIds: Set<string>;
   title: string;
   description: string;
 };
@@ -63,11 +65,11 @@ export function ManagePaymentMethodsDialog({
   onUpdate,
   onDelete,
   usageCount,
-  builtInIds,
   title,
   description,
 }: Props) {
   const { t, dir, lang } = useI18n();
+  const { user, profile, refreshProfile } = useAuth();
   const [editId, setEditId] = useState<string | null>(null);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deleteId, setDeleteId] = useState<string | null>(null);
@@ -89,6 +91,44 @@ export function ManagePaymentMethodsDialog({
       ? "יש תנועות שמשתמשות באמצעי תשלום זה. בחרו חלופה להעברה לפני מחיקה."
       : "There are transactions using this payment method. Choose an alternative to reassign them to before deleting.";
 
+  async function clearProfileDefaultIfMatches(deletedId: string) {
+    if (!user?.id) return;
+    const column =
+      kind === "payment" ? "default_payment_method_id" : "default_destination_account_id";
+    const current =
+      kind === "payment"
+        ? profile?.default_payment_method_id
+        : profile?.default_destination_account_id;
+    if (current !== deletedId) return;
+    const { error } = await supabase
+      .from("profiles")
+      .update({ [column]: "" })
+      .eq("id", user.id);
+    if (error) {
+      console.error("[ManagePaymentMethods] clear default", error);
+      return;
+    }
+    await refreshProfile();
+  }
+
+  async function setProfileDefault(id: string) {
+    if (!user?.id) return;
+    const column =
+      kind === "payment" ? "default_payment_method_id" : "default_destination_account_id";
+    const { error } = await supabase
+      .from("profiles")
+      .update({ [column]: id })
+      .eq("id", user.id);
+    if (error) {
+      toast.error(
+        lang === "he" ? `שמירה נכשלה: ${error.message}` : `Could not save: ${error.message}`,
+      );
+      return;
+    }
+    await refreshProfile();
+    toast.success(t.manageMethodsDefaultSaved);
+  }
+
   return (
     <>
       <Dialog open={open} onOpenChange={onOpenChange}>
@@ -100,11 +140,14 @@ export function ManagePaymentMethodsDialog({
 
           <div className="space-y-3">
             {sorted.map((m) => {
-              const builtin = builtInIds.has(m.id);
+              const isProfileDefault =
+                kind === "payment"
+                  ? profile?.default_payment_method_id === m.id
+                  : profile?.default_destination_account_id === m.id;
               return (
                 <div
                   key={m.id}
-                  className="flex items-center justify-between gap-3 rounded-xl border border-border/70 bg-background px-3 py-3"
+                  className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border/70 bg-background px-3 py-3"
                 >
                   <button
                     type="button"
@@ -128,7 +171,7 @@ export function ManagePaymentMethodsDialog({
                       </span>
                     ) : null}
                   </button>
-                  <div className="flex shrink-0 items-center gap-2">
+                  <div className="flex shrink-0 flex-wrap items-center gap-2">
                     <Button
                       type="button"
                       variant="outline"
@@ -137,31 +180,39 @@ export function ManagePaymentMethodsDialog({
                     >
                       {lang === "he" ? "עריכה" : "Edit"}
                     </Button>
-                    {!builtin ? (
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="icon"
-                        aria-label={lang === "he" ? "מחיקה" : "Delete"}
-                        onClick={() => {
-                          const count = usageCount.get(m.id) ?? 0;
-                          if (count <= 0) {
-                            onDelete(m.id);
-                            if (selectedId === m.id) {
-                              const fallback = sorted.find((x) => x.id !== m.id)?.id;
-                              if (fallback) onSelectId(fallback);
-                            }
-                            return;
+                    <Button
+                      type="button"
+                      variant={isProfileDefault ? "secondary" : "outline"}
+                      size="sm"
+                      disabled={isProfileDefault}
+                      onClick={() => void setProfileDefault(m.id)}
+                    >
+                      {isProfileDefault ? t.manageMethodsIsDefault : t.manageMethodsSetAsDefault}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="icon"
+                      aria-label={lang === "he" ? "מחיקה" : "Delete"}
+                      onClick={() => {
+                        const count = usageCount.get(m.id) ?? 0;
+                        if (count <= 0) {
+                          onDelete(m.id);
+                          void clearProfileDefaultIfMatches(m.id);
+                          if (selectedId === m.id) {
+                            const fallback = sorted.find((x) => x.id !== m.id)?.id;
+                            if (fallback) onSelectId(fallback);
                           }
-                          setDeleteId(m.id);
-                          const fallback = sorted.find((x) => x.id !== m.id)?.id ?? "";
-                          setMoveToId(fallback);
-                          setDeleteOpen(true);
-                        }}
-                      >
-                        <Trash2 className="size-4" aria-hidden />
-                      </Button>
-                    ) : null}
+                          return;
+                        }
+                        setDeleteId(m.id);
+                        const fallback = sorted.find((x) => x.id !== m.id)?.id ?? "";
+                        setMoveToId(fallback);
+                        setDeleteOpen(true);
+                      }}
+                    >
+                      <Trash2 className="size-4" aria-hidden />
+                    </Button>
                   </div>
                 </div>
               );
@@ -295,6 +346,7 @@ export function ManagePaymentMethodsDialog({
               onClick={() => {
                 if (!deleteId || !moveToId) return;
                 onDelete(deleteId, moveToId);
+                void clearProfileDefaultIfMatches(deleteId);
                 if (selectedId === deleteId) onSelectId(moveToId);
                 setDeleteOpen(false);
               }}
@@ -307,4 +359,3 @@ export function ManagePaymentMethodsDialog({
     </>
   );
 }
-

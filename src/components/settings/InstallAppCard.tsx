@@ -39,10 +39,16 @@ function isIOS(): boolean {
   return navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1;
 }
 
+function isAndroid(): boolean {
+  if (typeof navigator === "undefined") return false;
+  return /Android/i.test(navigator.userAgent);
+}
+
 export function InstallAppCard() {
   const { t, dir } = useI18n();
   const [standalone, setStandalone] = useState(() => isStandaloneDisplay());
   const [guidelinesOpen, setGuidelinesOpen] = useState(false);
+  const [canInstallViaPrompt, setCanInstallViaPrompt] = useState(false);
   const deferredRef = useRef<BeforeInstallPromptEvent | null>(null);
 
   useEffect(() => {
@@ -69,24 +75,22 @@ export function InstallAppCard() {
   const onInstallClick = useCallback(async () => {
     if (standalone) return;
     const ev = deferredRef.current;
-    if (ev) {
-      await ev.prompt();
-      try {
-        await ev.userChoice;
-      } catch {
-        /* ignore */
-      }
-      deferredRef.current = null;
-      return;
+    if (!ev) return;
+    await ev.prompt();
+    try {
+      await ev.userChoice;
+    } catch {
+      /* ignore */
     }
-    if (!isIOS()) {
-      window.alert(t.installAppDesktopHint);
-    }
-  }, [standalone, t.installAppDesktopHint]);
+    deferredRef.current = null;
+    setCanInstallViaPrompt(false);
+  }, [standalone]);
+
+  const showAndroidInstall = !standalone && isAndroid();
 
   return (
     <>
-      <Card className="border-border/80 shadow-none">
+      <Card className="rounded-2xl border-border/80 bg-zinc-100 p-1 shadow-none dark:bg-zinc-900">
         <CardHeader className="space-y-1 px-4 pb-2 pt-4">
           <CardTitle className="text-base">{t.installAppSectionTitle}</CardTitle>
           <CardDescription className="text-base leading-relaxed">
@@ -98,6 +102,21 @@ export function InstallAppCard() {
             <p className="rounded-lg border border-border/60 bg-muted/20 px-4 py-3 text-base leading-relaxed text-muted-foreground">
               {t.installAppAlreadyInstalled}
             </p>
+          ) : isIOS() ? (
+            <div className="space-y-4">
+              <p className="text-base font-medium leading-relaxed text-foreground">
+                {t.installAppIosOnlyIntro}
+              </p>
+              <section className="space-y-3">
+                <h3 className="text-base font-semibold leading-relaxed text-foreground">
+                  {t.installAppSafariSectionTitle}
+                </h3>
+                <ul className="list-none space-y-3 text-pretty text-base leading-relaxed text-muted-foreground">
+                  <li>{t.installAppSafariBullet1}</li>
+                  <li>{t.installAppSafariBullet2}</li>
+                </ul>
+              </section>
+            </div>
           ) : (
             <div className="flex flex-col gap-4">
               <Button
@@ -113,23 +132,26 @@ export function InstallAppCard() {
                 {t.installAppGuidelinesButton}
               </Button>
 
-              <div className="flex flex-col gap-2">
-                <Button
-                  type="button"
-                  variant="outline"
-                  className={cn(
-                    "h-12 w-full gap-2 border-border/80 text-base font-medium leading-relaxed",
-                    "shadow-sm transition-colors hover:bg-accent/60",
-                  )}
-                  onClick={() => void onInstallClick()}
-                >
-                  <Download className="size-5 shrink-0 opacity-80" aria-hidden />
-                  {t.installAppButton}
-                </Button>
-                <p className="text-center text-sm leading-relaxed text-muted-foreground">
-                  {t.installAppAndroidChromeNote}
-                </p>
-              </div>
+              {showAndroidInstall ? (
+                <div className="flex flex-col gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className={cn(
+                      "h-12 w-full gap-2 border-border/80 text-base font-medium leading-relaxed",
+                      "shadow-sm transition-colors hover:bg-accent/60",
+                    )}
+                    onClick={() => void onInstallClick()}
+                    disabled={!canInstallViaPrompt}
+                  >
+                    <Download className="size-5 shrink-0 opacity-80" aria-hidden />
+                    {t.installAppButton}
+                  </Button>
+                  <p className="text-center text-sm leading-relaxed text-muted-foreground">
+                    {t.installAppAndroidChromeNote}
+                  </p>
+                </div>
+              ) : null}
             </div>
           )}
         </CardContent>
@@ -137,7 +159,7 @@ export function InstallAppCard() {
 
       <Dialog open={guidelinesOpen} onOpenChange={setGuidelinesOpen}>
         <DialogContent
-          className="max-h-[min(90vh,32rem)] max-w-md gap-0 overflow-y-auto p-0 sm:max-w-md"
+          className="max-h-[min(90vh,32rem)] max-w-md gap-0 overflow-y-auto p-0 no-scrollbar sm:max-w-md"
           dir={dir}
         >
           <DialogHeader className="border-b border-border/60 px-5 py-4 text-start">
@@ -159,7 +181,7 @@ export function InstallAppCard() {
               <h3 className="text-base font-semibold leading-relaxed text-foreground">
                 {t.installAppChromeSectionTitle}
               </h3>
-              <ul className="list-disc space-y-3 ps-5 text-pretty text-base leading-relaxed text-muted-foreground marker:text-muted-foreground/60">
+              <ul className="list-none space-y-3 text-pretty text-base leading-relaxed text-muted-foreground">
                 <li>{t.installAppChromeBullet1}</li>
                 <li>{t.installAppChromeBullet2}</li>
               </ul>
@@ -169,7 +191,7 @@ export function InstallAppCard() {
               <h3 className="text-base font-semibold leading-relaxed text-foreground">
                 {t.installAppSafariSectionTitle}
               </h3>
-              <ul className="list-disc space-y-3 ps-5 text-pretty text-base leading-relaxed text-muted-foreground marker:text-muted-foreground/60">
+              <ul className="list-none space-y-3 text-pretty text-base leading-relaxed text-muted-foreground">
                 <li>{t.installAppSafariBullet1}</li>
                 <li>{t.installAppSafariBullet2}</li>
               </ul>

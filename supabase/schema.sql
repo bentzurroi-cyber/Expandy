@@ -14,7 +14,9 @@ create table if not exists public.profiles (
   id uuid primary key references auth.users (id) on delete cascade,
   email text not null unique,
   household_id text not null,
-  is_admin boolean not null default false
+  is_admin boolean not null default false,
+  default_payment_method_id text not null default '',
+  default_destination_account_id text not null default ''
 );
 
 insert into public.households (code)
@@ -49,6 +51,7 @@ create table if not exists public.expenses (
   is_recurring boolean not null default false,
   payment_method_id text not null default '',
   entry_type text not null default 'expense',
+  receipt_urls text[],
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );

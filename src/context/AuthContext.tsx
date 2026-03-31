@@ -74,7 +74,9 @@ async function ensureProfile(user: User, options?: EnsureProfileOptions) {
   console.log("[Auth] Profile fetch started", { userId: user.id, wantsJoin });
   const { data: existing, error } = await supabase
     .from("profiles")
-    .select("id, email, household_id, is_admin")
+    .select(
+      "id, email, household_id, is_admin, default_payment_method_id, default_destination_account_id",
+    )
     .eq("id", user.id)
     .maybeSingle();
   if (error) {
@@ -97,7 +99,7 @@ async function ensureProfile(user: User, options?: EnsureProfileOptions) {
       }
       return;
     }
-    if (!isValidHouseholdCode(existing.household_id ?? "")) {
+    if (!isValidHouseholdCode(normalizeHouseholdCode(existing.household_id ?? ""))) {
       const assigned = await generateUniqueHouseholdCode(user.id);
       await ensureHouseholdExists(assigned, user.id);
       await supabase.from("profiles").update({ household_id: assigned }).eq("id", user.id);
@@ -129,27 +131,58 @@ async function ensureProfile(user: User, options?: EnsureProfileOptions) {
   });
 }
 
-async function forceCreateProfile(user: User): Promise<ProfileRow | null> {
-  const email = user.email?.trim().toLowerCase() ?? "";
-  if (!email) return null;
+async function ensureValidHouseholdForProfile(
+  user: User,
+  profile: ProfileRow | null,
+): Promise<ProfileRow | null> {
+  if (!profile) {
+    const assigned = await generateUniqueHouseholdCode(user.id);
+    await ensureHouseholdExists(assigned, user.id);
+    const payload: ProfileRow = {
+      id: user.id,
+      email: user.email?.trim().toLowerCase() ?? "",
+      household_id: assigned,
+      is_admin: false,
+      default_payment_method_id: "",
+      default_destination_account_id: "",
+    };
+    const { data, error } = await supabase
+      .from("profiles")
+      .upsert(payload)
+      .select(
+        "id, email, household_id, is_admin, default_payment_method_id, default_destination_account_id",
+      )
+      .maybeSingle();
+    if (error) {
+      console.error("[Auth] ensureValidHouseholdForProfile upsert failed", error);
+      return payload;
+    }
+    return (data as ProfileRow | null) ?? payload;
+  }
+
+  const normalized = normalizeHouseholdCode(profile.household_id ?? "");
+  if (isValidHouseholdCode(normalized)) {
+    if (profile.household_id !== normalized) {
+      return { ...profile, household_id: normalized };
+    }
+    return profile;
+  }
+
   const assigned = await generateUniqueHouseholdCode(user.id);
-  const payload: ProfileRow = {
-    id: user.id,
-    email,
-    household_id: assigned,
-    is_admin: false,
-  };
+  await ensureHouseholdExists(assigned, user.id);
   const { data, error } = await supabase
     .from("profiles")
-    .upsert(payload)
-    .select("id, email, household_id, is_admin")
+    .update({ household_id: assigned })
+    .eq("id", user.id)
+    .select(
+      "id, email, household_id, is_admin, default_payment_method_id, default_destination_account_id",
+    )
     .maybeSingle();
   if (error) {
-    console.log("[Auth] forceCreateProfile failed", { userId: user.id, error: error.message });
-    return null;
+    console.error("[Auth] ensureValidHouseholdForProfile update failed", error);
+    return { ...profile, household_id: assigned };
   }
-  console.log("[Auth] Household ID assigned", { userId: user.id, householdId: assigned });
-  return (data as ProfileRow | null) ?? payload;
+  return (data as ProfileRow | null) ?? { ...profile, household_id: assigned };
 }
 
 function guestProfileFor(user: User): ProfileRow {
@@ -158,6 +191,8 @@ function guestProfileFor(user: User): ProfileRow {
     email: user.email?.trim().toLowerCase() ?? "",
     household_id: "",
     is_admin: false,
+    default_payment_method_id: "",
+    default_destination_account_id: "",
   };
 }
 
@@ -176,7 +211,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       async () =>
         await supabase
           .from("profiles")
-          .select("id, email, household_id, is_admin")
+          .select(
+      "id, email, household_id, is_admin, default_payment_method_id, default_destination_account_id",
+    )
           .eq("id", userId)
           .maybeSingle(),
       5000,
@@ -213,8 +250,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         return;
       }
       const u = nextSession.user;
-      // Default profile immediately so nothing blocks leaving the auth screen / main UI.
-      setProfile(guestProfileFor(u));
+      // Keep an existing profile for this user during token refreshes to avoid
+      // transient household_id="" state that can clear synced app data.
+      setProfile((prev) => {
+        if (prev && prev.id === u.id) return prev;
+        return guestProfileFor(u);
+      });
       try {
         await ensureProfile(u);
       } catch (err) {
@@ -223,25 +264,26 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       try {
         const nextProfile = await fetchProfileByUserId(u.id);
         if (!nextProfile) {
-          const forced = await forceCreateProfile(u);
-          if (forced) {
-            setProfile(forced);
-            setProfileError(null);
-          } else {
-            await ensureProfile(u);
-            const recovered = await fetchProfileByUserId(u.id);
-            setProfile(recovered ?? guestProfileFor(u));
-            if (!recovered) {
-              setProfileError("Profile not found in database");
-            }
+          // Avoid force-creating a new household on transient fetch issues.
+          // Keep current profile and retry ensure/fetch once.
+          await ensureProfile(u);
+          const recovered = await fetchProfileByUserId(u.id);
+          const fixed = await ensureValidHouseholdForProfile(
+            u,
+            recovered ?? null,
+          );
+          setProfile((prev) => fixed ?? (prev && prev.id === u.id ? prev : guestProfileFor(u)));
+          if (!recovered) {
+            setProfileError("Profile not found in database");
           }
         } else {
-          setProfile(nextProfile);
+          const fixed = await ensureValidHouseholdForProfile(u, nextProfile);
+          setProfile(fixed ?? nextProfile);
           setProfileError(null);
         }
       } catch (err) {
         console.error("[Auth] profile hydrate failed", err);
-        setProfile(guestProfileFor(u));
+        setProfile((prev) => (prev && prev.id === u.id ? prev : guestProfileFor(u)));
         setProfileError(
           err instanceof Error
             ? `Profile fetch failed: ${err.message}`

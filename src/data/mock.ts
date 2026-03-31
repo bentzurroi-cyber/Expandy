@@ -77,6 +77,8 @@ export type Expense = {
   recurringMonthly: boolean;
   /** Bank reconciliation — optional; omitted means not verified. */
   isVerified?: boolean;
+  /** Public URLs to receipt images in Storage (max 3). */
+  receiptUrls?: string[];
 };
 
 /** נתוני הדגמה — מפוזרים לפי חודשים לסינון בלוח הבקרה */

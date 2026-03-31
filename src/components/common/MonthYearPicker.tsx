@@ -56,6 +56,7 @@ export function MonthYearPicker({
           variant="outline"
           className={cn(
             "min-h-11 w-full justify-between px-3.5 text-base font-normal leading-relaxed",
+            "[&>span]:min-w-0",
             triggerClassName,
           )}
         >

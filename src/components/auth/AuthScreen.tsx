@@ -7,6 +7,7 @@ import { Label } from "@/components/ui/label";
 import { useAuth } from "@/context/AuthContext";
 import { supabase } from '../../lib/supabase';
 import { normalizeHouseholdCode } from "@/lib/household";
+import { toast } from "sonner";
 
 export function AuthScreen() {
   const { signUp } = useAuth();
@@ -33,7 +34,7 @@ export function AuthScreen() {
       password,
     });
     if (error) {
-      window.alert(error.message);
+      toast.error(`ההתחברות נכשלה: ${error.message}`);
       return;
     }
   }
