@@ -30,7 +30,7 @@ import {
   parseEntryTypeLabel,
   parseImportDateToIso,
 } from "@/lib/importCsv";
-import { pickRandomImportCategoryColor } from "@/lib/categoryColors";
+import { pickDistinctImportCategoryColor } from "@/lib/categoryColors";
 import {
   dedupeCategoriesByName,
   dedupeExpenseRows,
@@ -70,7 +70,6 @@ const STORAGE_DELETED_BUILTIN_EXPENSE_CATS = "expandy-deleted-builtin-expense-ca
 const STORAGE_DELETED_BUILTIN_INCOME_CATS = "expandy-deleted-builtin-income-cats-v1";
 const STORAGE_EXPENSE_CATEGORY_ORDER = "expandy-expense-category-order-v1";
 const STORAGE_INCOME_CATEGORY_ORDER = "expandy-income-category-order-v1";
-const STORAGE_QUICK_ACCESS_COUNT = "expandy-quick-access-count-v1";
 
 function readDeletedBuiltinIds(key: string): Set<string> {
   try {
@@ -108,17 +107,6 @@ function readIncomeCategoryOrder(): string[] {
   }
 }
 
-function readQuickAccessCount(): number {
-  try {
-    const raw = localStorage.getItem(STORAGE_QUICK_ACCESS_COUNT);
-    if (!raw) return 8;
-    const parsed = Number(raw);
-    if (!Number.isFinite(parsed)) return 8;
-    return Math.max(1, Math.min(8, Math.floor(parsed)));
-  } catch {
-    return 8;
-  }
-}
 
 function isValidExpenseShape(row: unknown): row is Expense {
   if (!row || typeof row !== "object") return false;
@@ -339,10 +327,23 @@ function projectedRecurringId(templateId: string, ym: string): string {
   return `rec|${templateId}|${ym}`;
 }
 
+function toDbCategoryId(value: string | undefined): string | null {
+  return typeof value === "string" && isStandardUuid(value) ? value : null;
+}
+
+function normalizeCategoryDisplayLimit(value: unknown): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return 8;
+  return Math.max(1, Math.min(8, Math.floor(parsed)));
+}
+
 function buildSupabaseExpenseUpdateBody(patch: ExpenseUpdatePatch): Record<string, unknown> {
   const body: Record<string, unknown> = {};
   if (patch.amount !== undefined) body.amount = patch.amount;
-  if (patch.categoryId !== undefined) body.category = patch.categoryId;
+  if (patch.categoryId !== undefined) {
+    body.category = patch.categoryId;
+    body.category_id = toDbCategoryId(patch.categoryId);
+  }
   if (patch.date !== undefined) body.date = patch.date;
   if (patch.note !== undefined) body.note = patch.note;
   if (patch.currency !== undefined) body.currency = patch.currency;
@@ -379,7 +380,8 @@ type SupabaseExpenseRow = {
   user_id: string;
   household_id: string;
   amount: number;
-  category: string;
+  category?: string | null;
+  category_id?: string | null;
   date: string;
   note: string;
   currency: string;
@@ -398,26 +400,6 @@ type SupabaseExpenseRow = {
 };
 
 type PaymentMethodOverride = CategoryOverride;
-
-type HouseholdAppState = {
-  customIncomeSources?: Category[];
-  customDestinationAccounts?: PaymentMethod[];
-  customPaymentMethods?: PaymentMethod[];
-  customExpenseCategories?: Category[];
-  customCurrencies?: CurrencyDef[];
-  expenseCategoryOverrides?: Record<string, CategoryOverride>;
-  incomeCategoryOverrides?: Record<string, IncomeCategoryOverride>;
-  recurringIncomeSkips?: Record<string, string[]>;
-  deletedBuiltinExpenseCategoryIds?: string[];
-  deletedBuiltinIncomeSourceIds?: string[];
-  paymentMethodOverrides?: Record<string, PaymentMethodOverride>;
-  destinationAccountOverrides?: Record<string, PaymentMethodOverride>;
-  deletedBuiltinPaymentMethodIds?: string[];
-  deletedBuiltinDestinationAccountIds?: string[];
-  expenseCategoryOrder?: string[];
-  incomeCategoryOrder?: string[];
-  quickAccessCount?: number;
-};
 
 function receiptUrlsFromDbRow(row: SupabaseExpenseRow): string[] | undefined {
   const fromArr = Array.isArray(row.receipt_urls)
@@ -444,7 +426,7 @@ function mapDbExpenseToApp(row: SupabaseExpenseRow): Expense {
     date: row.date,
     amount: Number(row.amount) || 0,
     currency: row.currency,
-    categoryId: row.category,
+    categoryId: row.category_id ?? row.category ?? "",
     paymentMethodId,
     note: row.note ?? "",
     type,
@@ -663,9 +645,8 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
     () => readIncomeCategoryOrder(),
   );
   const [quickAccessCount, setQuickAccessCountState] = useState<number>(() =>
-    readQuickAccessCount(),
+    normalizeCategoryDisplayLimit(profile?.category_display_limit),
   );
-  const [supabaseStateReady, setSupabaseStateReady] = useState(false);
 
   const waitForCloudContext = useCallback(async () => {
     // On wake-up, auth/profile can lag briefly; wait before writing.
@@ -688,10 +669,6 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
   }, [authLoading, profile?.household_id, session, user?.id]);
 
   useEffect(() => {
-    setSupabaseStateReady(false);
-  }, [profile?.household_id]);
-
-  useEffect(() => {
     async function loadHouseholdExpenses() {
       if (authLoading || !session || !user?.id) {
         return;
@@ -703,7 +680,7 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
         const { data, error } = await supabase
           .from("expenses")
           .select(
-          "id, user_id, household_id, amount, category, date, note, currency, is_verified, installments_info, is_recurring, entry_type, payment_method_id, receipt_urls",
+          "id, user_id, household_id, amount, category, category_id, date, note, currency, is_verified, installments_info, is_recurring, entry_type, payment_method_id, receipt_urls",
           )
           .eq("household_id", householdId)
           .order("date", { ascending: false });
@@ -752,6 +729,7 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
               household_id: householdId,
               amount: row.amount,
               category: row.categoryId,
+              category_id: toDbCategoryId(row.categoryId),
               date: row.date,
               note: row.note,
               currency: row.currency,
@@ -810,201 +788,178 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
         }
       }
 
-      const rawBudgets = localStorage.getItem("expandy-category-budgets-v1");
-      if (rawBudgets) {
-        try {
-          const parsed = JSON.parse(rawBudgets) as Record<string, number>;
-          await supabase.from("settings").upsert({
-            household_id: householdId,
-            budget_limits: parsed,
-          });
-        } catch {
-          /* ignore malformed local budgets */
-        }
-      }
-
       removeExpandyAppDataKeys();
       localStorage.setItem(migrationKey, "1");
     }
     void migrateLocalDataOnce();
   }, [householdId, user?.id]);
 
+  const expenseCategoriesForStorage = useMemo(
+    () => dedupeCategoriesByName(customExpenseCategories),
+    [customExpenseCategories],
+  );
   const incomeSourcesForStorage = useMemo(
     () => dedupeCategoriesByName(customIncomeSources),
     [customIncomeSources],
   );
 
-  const destinationAccountsForStorage = useMemo(
-    () => dedupePaymentMethodsByName(customDestinationAccounts),
-    [customDestinationAccounts],
-  );
-
-  const paymentMethodsForStorage = useMemo(
-    () => dedupePaymentMethodsByName(customPaymentMethods),
-    [customPaymentMethods],
-  );
-
-  const expenseCategoriesForStorage = useMemo(
-    () => dedupeCategoriesByName(customExpenseCategories),
-    [customExpenseCategories],
-  );
-
-  const currenciesForStorage = useMemo(
-    () => dedupeCurrenciesByCode(customCurrencies),
-    [customCurrencies],
-  );
   useEffect(() => {
-    async function loadHouseholdSettings() {
-      if (!isValidHouseholdCode(householdId)) {
-        setSupabaseStateReady(true);
-        return;
-      }
-      const { data } = await supabase
-        .from("settings")
-        .select("app_state")
-        .eq("household_id", householdId)
-        .maybeSingle();
-      const appState = (data?.app_state ?? {}) as HouseholdAppState;
-      if (appState.customIncomeSources) {
-        setCustomIncomeSources(dedupeCategoriesByName(appState.customIncomeSources));
-      }
-      if (appState.customDestinationAccounts) {
-        setCustomDestinationAccounts(
-          dedupePaymentMethodsByName(appState.customDestinationAccounts),
-        );
-      }
-      if (appState.customPaymentMethods) {
-        setCustomPaymentMethods(dedupePaymentMethodsByName(appState.customPaymentMethods));
-      }
-      if (appState.customExpenseCategories) {
-        setCustomExpenseCategories(dedupeCategoriesByName(appState.customExpenseCategories));
-      }
-      if (appState.customCurrencies) {
-        setCustomCurrencies(dedupeCurrenciesByCode(appState.customCurrencies));
-      }
-      if (appState.expenseCategoryOverrides) {
-        setExpenseCategoryOverrides(appState.expenseCategoryOverrides);
-      }
-      if (appState.incomeCategoryOverrides) {
-        setIncomeCategoryOverrides(appState.incomeCategoryOverrides);
-      }
-      if (appState.recurringIncomeSkips) {
-        setRecurringIncomeSkips(appState.recurringIncomeSkips);
-      }
-      if (appState.deletedBuiltinExpenseCategoryIds) {
-        setDeletedBuiltinExpenseCategoryIds(
-          new Set(appState.deletedBuiltinExpenseCategoryIds),
-        );
-      }
-      if (appState.deletedBuiltinIncomeSourceIds) {
-        setDeletedBuiltinIncomeSourceIds(new Set(appState.deletedBuiltinIncomeSourceIds));
-      }
-      if (appState.expenseCategoryOrder) setExpenseCategoryOrder(appState.expenseCategoryOrder);
-      if (appState.incomeCategoryOrder) setIncomeCategoryOrder(appState.incomeCategoryOrder);
-      if (typeof appState.quickAccessCount === "number") {
-        setQuickAccessCountState(Math.max(1, Math.min(8, Math.floor(appState.quickAccessCount))));
-      }
-      if (appState.paymentMethodOverrides) {
-        setPaymentMethodOverrides(appState.paymentMethodOverrides);
-      }
-      if (appState.destinationAccountOverrides) {
-        setDestinationAccountOverrides(appState.destinationAccountOverrides);
-      }
-      if (appState.deletedBuiltinPaymentMethodIds?.length) {
-        setDeletedBuiltinPaymentMethodIds(new Set(appState.deletedBuiltinPaymentMethodIds));
-      }
-      if (appState.deletedBuiltinDestinationAccountIds?.length) {
-        setDeletedBuiltinDestinationAccountIds(
-          new Set(appState.deletedBuiltinDestinationAccountIds),
-        );
-      }
-      setSupabaseStateReady(true);
+    try {
+      localStorage.setItem(STORAGE_EXPENSE_CATEGORIES, JSON.stringify(customExpenseCategories));
+    } catch {
+      /* ignore */
     }
-    void loadHouseholdSettings();
-  }, [householdId]);
+  }, [customExpenseCategories]);
 
   useEffect(() => {
-    if (!isValidHouseholdCode(householdId) || !supabaseStateReady) return;
-    const payload: HouseholdAppState = {
-      customIncomeSources: incomeSourcesForStorage,
-      customDestinationAccounts: destinationAccountsForStorage,
-      customPaymentMethods: paymentMethodsForStorage,
-      customExpenseCategories: expenseCategoriesForStorage,
-      customCurrencies: currenciesForStorage,
-      expenseCategoryOverrides,
-      incomeCategoryOverrides,
-      recurringIncomeSkips,
-      deletedBuiltinExpenseCategoryIds: [...deletedBuiltinExpenseCategoryIds],
-      deletedBuiltinIncomeSourceIds: [...deletedBuiltinIncomeSourceIds],
-      paymentMethodOverrides,
-      destinationAccountOverrides,
-      deletedBuiltinPaymentMethodIds: [...deletedBuiltinPaymentMethodIds],
-      deletedBuiltinDestinationAccountIds: [...deletedBuiltinDestinationAccountIds],
-      expenseCategoryOrder,
-      incomeCategoryOrder,
-      quickAccessCount,
-    };
-    void supabase.from("settings").upsert({
-      household_id: householdId,
-      budget_limits: {},
-      currencies_list: currenciesForStorage.map((x) => x.code),
-      app_state: payload,
-    });
-  }, [
-    householdId,
-    supabaseStateReady,
-    incomeSourcesForStorage,
-    destinationAccountsForStorage,
-    paymentMethodsForStorage,
-    expenseCategoriesForStorage,
-    currenciesForStorage,
-    expenseCategoryOverrides,
-    incomeCategoryOverrides,
-    recurringIncomeSkips,
-    deletedBuiltinExpenseCategoryIds,
-    deletedBuiltinIncomeSourceIds,
-    paymentMethodOverrides,
-    destinationAccountOverrides,
-    deletedBuiltinPaymentMethodIds,
-    deletedBuiltinDestinationAccountIds,
-    expenseCategoryOrder,
-    incomeCategoryOrder,
-    quickAccessCount,
-  ]);
+    try {
+      localStorage.setItem(STORAGE_INCOME_SOURCES, JSON.stringify(customIncomeSources));
+    } catch {
+      /* ignore */
+    }
+  }, [customIncomeSources]);
 
   useEffect(() => {
-    if (!isValidHouseholdCode(householdId) || !supabaseStateReady) return;
-    const expensePos = new Map(expenseCategoryOrder.map((id, i) => [id, i] as const));
-    const incomePos = new Map(incomeCategoryOrder.map((id, i) => [id, i] as const));
+    try {
+      localStorage.setItem(STORAGE_PAYMENT_METHODS, JSON.stringify(customPaymentMethods));
+    } catch {
+      /* ignore */
+    }
+  }, [customPaymentMethods]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(STORAGE_DEST_ACCOUNTS, JSON.stringify(customDestinationAccounts));
+    } catch {
+      /* ignore */
+    }
+  }, [customDestinationAccounts]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        STORAGE_DELETED_BUILTIN_EXPENSE_CATS,
+        JSON.stringify([...deletedBuiltinExpenseCategoryIds]),
+      );
+    } catch {
+      /* ignore */
+    }
+  }, [deletedBuiltinExpenseCategoryIds]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        STORAGE_DELETED_BUILTIN_INCOME_CATS,
+        JSON.stringify([...deletedBuiltinIncomeSourceIds]),
+      );
+    } catch {
+      /* ignore */
+    }
+  }, [deletedBuiltinIncomeSourceIds]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(STORAGE_EXPENSE_CATEGORY_ORDER, JSON.stringify(expenseCategoryOrder));
+    } catch {
+      /* ignore */
+    }
+  }, [expenseCategoryOrder]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(STORAGE_INCOME_CATEGORY_ORDER, JSON.stringify(incomeCategoryOrder));
+    } catch {
+      /* ignore */
+    }
+  }, [incomeCategoryOrder]);
+
+  useEffect(() => {
+    if (authLoading || !profile) return;
+    const normalized = normalizeCategoryDisplayLimit(profile.category_display_limit);
+    setQuickAccessCountState((prev) => (prev === normalized ? prev : normalized));
+  }, [authLoading, profile?.id, profile?.category_display_limit]);
+
+
+  useEffect(() => {
+    async function loadCategoriesFromSupabase() {
+      if (authLoading || !session || !user?.id) return;
+      const { data, error } = await supabase
+        .from("categories")
+        .select("id,name,color,icon,type")
+        .eq("user_id", user.id);
+      if (error || !Array.isArray(data)) return;
+      const expenseRows = data
+        .filter((r) => String((r as { type?: unknown }).type ?? "") === "expense")
+        .map((r) => ({
+          id: String((r as { id?: unknown }).id ?? ""),
+          name: String((r as { name?: unknown }).name ?? ""),
+          color: String((r as { color?: unknown }).color ?? "#737373"),
+          iconKey: normalizeCategoryIconKey((r as { icon?: unknown }).icon, "tag"),
+        }))
+        .filter((r) => r.id && r.name);
+      const incomeRows = data
+        .filter((r) => String((r as { type?: unknown }).type ?? "") === "income")
+        .map((r) => ({
+          id: String((r as { id?: unknown }).id ?? ""),
+          name: String((r as { name?: unknown }).name ?? ""),
+          color: String((r as { color?: unknown }).color ?? "#737373"),
+          iconKey: normalizeCategoryIconKey((r as { icon?: unknown }).icon, "tag"),
+        }))
+        .filter((r) => r.id && r.name);
+
+      const expenseCustom = expenseRows.filter((r) => !MOCK_CATEGORIES.some((b) => b.id === r.id));
+      const incomeCustom = incomeRows.filter((r) => !MOCK_INCOME_SOURCES.some((b) => b.id === r.id));
+      setCustomExpenseCategories(
+        dedupeCategoriesByName(
+          expenseCustom.map(({ id, name, color, iconKey }) => ({
+            id,
+            name,
+            color,
+            iconKey,
+          })),
+        ),
+      );
+      setCustomIncomeSources(
+        dedupeCategoriesByName(
+          incomeCustom.map(({ id, name, color, iconKey }) => ({
+            id,
+            name,
+            color,
+            iconKey,
+          })),
+        ),
+      );
+    }
+    void loadCategoriesFromSupabase();
+  }, [authLoading, session, user?.id]);
+  useEffect(() => {
+    if (authLoading || !session || !user?.id) return;
     const rows = [
       ...expenseCategoriesForStorage.map((c) => ({
-        id: c.id,
-        household_id: householdId,
+        user_id: user.id,
         name: c.name,
-        type: "expense",
+        type: "expense" as const,
         color: c.color,
         icon: c.iconKey,
-        order_index: expensePos.get(c.id) ?? 9999,
+        ...(isStandardUuid(c.id) ? { id: c.id } : {}),
       })),
       ...incomeSourcesForStorage.map((c) => ({
-        id: c.id,
-        household_id: householdId,
+        user_id: user.id,
         name: c.name,
-        type: "income",
+        type: "income" as const,
         color: c.color,
         icon: c.iconKey,
-        order_index: incomePos.get(c.id) ?? 9999,
+        ...(isStandardUuid(c.id) ? { id: c.id } : {}),
       })),
     ];
     if (!rows.length) return;
-    void supabase.from("categories").upsert(rows);
+    void supabase.from("categories").upsert(rows, { onConflict: "user_id,name,type" });
   }, [
-    householdId,
-    supabaseStateReady,
+    authLoading,
+    session,
+    user?.id,
     expenseCategoriesForStorage,
     incomeSourcesForStorage,
-    expenseCategoryOrder,
-    incomeCategoryOrder,
   ]);
 
   const addExpense = useCallback(async (rawInput: AddExpenseInput) => {
@@ -1093,6 +1048,7 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
       household_id: cloud.householdId,
       amount: row.amount,
       category: row.categoryId,
+      category_id: toDbCategoryId(row.categoryId),
       date: row.date,
       note: row.note,
       currency: row.currency,
@@ -1371,17 +1327,20 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
 
       if (neededExpenseCats.size) {
         const toAdd: Category[] = [];
+        const usedColors = [...MOCK_CATEGORIES, ...customExpenseCategories].map((c) => c.color);
         for (const nk of neededExpenseCats) {
           if (expenseCatByNorm.has(nk)) continue;
           const displayName =
             firstExpenseCatDisplay.get(nk) ?? nk;
-          const id = `cat-custom-${newId()}`;
+          const id = newId();
+          const pickedColor = pickDistinctImportCategoryColor(usedColors);
           const option: Category = {
             id,
             name: displayName,
-            color: pickRandomImportCategoryColor(),
+            color: pickedColor,
             iconKey: "tag",
           };
+          usedColors.push(pickedColor);
           expenseCatByNorm.set(nk, id);
           toAdd.push(option);
         }
@@ -1400,17 +1359,20 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
 
       if (neededIncomeCats.size) {
         const toAdd: Category[] = [];
+        const usedColors = [...MOCK_INCOME_SOURCES, ...customIncomeSources].map((c) => c.color);
         for (const nk of neededIncomeCats) {
           if (incomeCatByNorm.has(nk)) continue;
           const displayName =
             firstIncomeCatDisplay.get(nk) ?? nk;
-          const id = `inc-custom-${newId()}`;
+          const id = newId();
+          const pickedColor = pickDistinctImportCategoryColor(usedColors);
           const option: Category = {
             id,
             name: displayName,
-            color: pickRandomImportCategoryColor(),
+            color: pickedColor,
             iconKey: "tag",
           };
+          usedColors.push(pickedColor);
           incomeCatByNorm.set(nk, id);
           toAdd.push(option);
         }
@@ -1558,6 +1520,28 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
             return { ok: false as const, error: "רק הכנסות מותרות בייבוא זה." };
           }
         }
+        const categoryById = new Map(incomeSources.map((c) => [c.id, c] as const));
+        const categoryRows = [...new Set(rows.map((r) => toDbCategoryId(r.categoryId)).filter(Boolean))]
+          .map((id) => {
+            const cid = id as string;
+            const local = categoryById.get(cid);
+            return {
+              id: cid,
+              user_id: cloud.userId,
+              type: "income" as const,
+              name: local?.name ?? "Imported income",
+              color: local?.color ?? "#737373",
+              icon: local?.iconKey ?? "tag",
+            };
+          });
+        if (categoryRows.length) {
+          const { error: categoriesError } = await supabase
+            .from("categories")
+            .upsert(categoryRows, { onConflict: "id" });
+          if (categoriesError) {
+            return { ok: false as const, error: categoriesError.message };
+          }
+        }
         const withIds: Expense[] = rows.map((r) => ({
           ...r,
           id: newId(),
@@ -1573,6 +1557,7 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
           household_id: cloud.householdId,
           amount: Number(row.amount),
           category: row.categoryId,
+          category_id: toDbCategoryId(row.categoryId),
           date: row.date,
           note: row.note ?? "",
           currency: row.currency,
@@ -1616,7 +1601,7 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
         };
       }
     },
-    [waitForCloudContext],
+    [waitForCloudContext, incomeSources],
   );
 
   const bulkImportExpenses = useCallback(
@@ -1635,6 +1620,28 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
             return { ok: false as const, error: "רק הוצאות מותרות בייבוא זה." };
           }
         }
+        const categoryById = new Map(expenseCategories.map((c) => [c.id, c] as const));
+        const categoryRows = [...new Set(rows.map((r) => toDbCategoryId(r.categoryId)).filter(Boolean))]
+          .map((id) => {
+            const cid = id as string;
+            const local = categoryById.get(cid);
+            return {
+              id: cid,
+              user_id: cloud.userId,
+              type: "expense" as const,
+              name: local?.name ?? "Imported expense",
+              color: local?.color ?? "#737373",
+              icon: local?.iconKey ?? "tag",
+            };
+          });
+        if (categoryRows.length) {
+          const { error: categoriesError } = await supabase
+            .from("categories")
+            .upsert(categoryRows, { onConflict: "id" });
+          if (categoriesError) {
+            return { ok: false as const, error: categoriesError.message };
+          }
+        }
         const withIds: Expense[] = rows.map((r) => ({
           ...r,
           id: newId(),
@@ -1650,6 +1657,7 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
           household_id: cloud.householdId,
           amount: Number(row.amount),
           category: row.categoryId,
+          category_id: toDbCategoryId(row.categoryId),
           date: row.date,
           note: row.note ?? "",
           currency: row.currency,
@@ -1693,7 +1701,7 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
         };
       }
     },
-    [waitForCloudContext],
+    [waitForCloudContext, expenseCategories],
   );
 
   function mergeExpensePatch(e: Expense, patch: ExpenseUpdatePatch): Expense {
@@ -1956,15 +1964,14 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
         (x) => normalizeOptionName(x.name) === normalizeOptionName(trimmed),
       );
       if (existing) return existing.id;
-      const id = `cat-custom-${newId()}`;
-      const colorPool = ["#10b981", "#06b6d4", "#84cc16", "#f59e0b", "#6366f1"];
+      const id = newId();
       const option: Category = {
         id,
         name: trimmed,
         color:
           typeof color === "string" && color.trim()
             ? color.trim()
-            : colorPool[Math.floor(Math.random() * colorPool.length)],
+            : pickDistinctImportCategoryColor(all.map((c) => c.color)),
         iconKey: normalizeCategoryIconKey(iconKey ?? "tag"),
       };
       setCustomExpenseCategories((prev) => [...prev, option]);
@@ -2053,15 +2060,16 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
       (x) => normalizeOptionName(x.name) === normalizeOptionName(trimmed),
     );
     if (existing) return existing.id;
-    const id = `inc-custom-${newId()}`;
-    const colorPool = ["#10b981", "#06b6d4", "#84cc16", "#f59e0b", "#6366f1"];
+      const id = newId();
     const option: Category = {
       id,
       name: trimmed,
       color:
         typeof color === "string" && color.trim()
           ? color.trim()
-          : colorPool[Math.floor(Math.random() * colorPool.length)],
+            : pickDistinctImportCategoryColor(
+                [...MOCK_INCOME_SOURCES, ...customIncomeSources].map((c) => c.color),
+              ),
       iconKey: normalizeCategoryIconKey(iconKey ?? "tag"),
     };
     setCustomIncomeSources((prev) => [...prev, option]);
@@ -2142,9 +2150,28 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
     setIncomeCategoryOrder(orderedIds);
   }, []);
 
-  const setQuickAccessCount = useCallback((count: number) => {
-    setQuickAccessCountState(Math.max(1, Math.min(8, Math.floor(count))));
-  }, []);
+  const setQuickAccessCount = useCallback(
+    (count: number) => {
+      const next = normalizeCategoryDisplayLimit(count);
+      if (next === quickAccessCount) return;
+      if (authLoading || !session || !user?.id) {
+        setQuickAccessCountState(next);
+        return;
+      }
+      void (async () => {
+        const { error } = await supabase
+          .from("profiles")
+          .update({ category_display_limit: next })
+          .eq("id", user.id);
+        if (error) {
+          toast.error(error.message);
+          return;
+        }
+        setQuickAccessCountState(next);
+      })();
+    },
+    [authLoading, quickAccessCount, session, user?.id],
+  );
 
   const addPaymentMethod = useCallback((name: string, iconKey?: string, color?: string) => {
     const trimmed = name.trim();
@@ -2412,8 +2439,7 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
       await Promise.all([
         supabase.from("expenses").delete().eq("household_id", householdId),
         supabase.from("assets").delete().eq("household_id", householdId),
-        supabase.from("categories").delete().eq("household_id", householdId),
-        supabase.from("settings").delete().eq("household_id", householdId),
+        ...(user?.id ? [supabase.from("categories").delete().eq("user_id", user.id)] : []),
       ]);
     }
     setExpenses([]);
@@ -2439,12 +2465,11 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
       localStorage.removeItem(STORAGE_DELETED_BUILTIN_INCOME_CATS);
       localStorage.removeItem(STORAGE_EXPENSE_CATEGORY_ORDER);
       localStorage.removeItem(STORAGE_INCOME_CATEGORY_ORDER);
-      localStorage.removeItem(STORAGE_QUICK_ACCESS_COUNT);
     } catch {
       /* ignore */
     }
     removeExpandyAppDataKeys();
-  }, [householdId]);
+  }, [householdId, user?.id]);
 
   const value = useMemo(
     () => ({

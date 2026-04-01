@@ -37,6 +37,19 @@ type AuthContextValue = {
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
+function clampCategoryDisplayLimit(value: unknown): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return 8;
+  return Math.max(1, Math.min(8, Math.floor(parsed)));
+}
+
+function normalizeProfileRow(row: ProfileRow): ProfileRow {
+  return {
+    ...row,
+    category_display_limit: clampCategoryDisplayLimit(row.category_display_limit),
+  };
+}
+
 async function withTimeout<T>(run: () => Promise<T>, ms: number, label: string): Promise<T> {
   return await Promise.race([
     run(),
@@ -75,7 +88,7 @@ async function ensureProfile(user: User, options?: EnsureProfileOptions) {
   const { data: existing, error } = await supabase
     .from("profiles")
     .select(
-      "id, email, household_id, is_admin, default_payment_method_id, default_destination_account_id",
+      "id, email, household_id, is_admin, default_payment_method_id, default_destination_account_id, category_display_limit",
     )
     .eq("id", user.id)
     .maybeSingle();
@@ -145,12 +158,13 @@ async function ensureValidHouseholdForProfile(
       is_admin: false,
       default_payment_method_id: "",
       default_destination_account_id: "",
+      category_display_limit: 8,
     };
     const { data, error } = await supabase
       .from("profiles")
       .upsert(payload)
       .select(
-        "id, email, household_id, is_admin, default_payment_method_id, default_destination_account_id",
+        "id, email, household_id, is_admin, default_payment_method_id, default_destination_account_id, category_display_limit",
       )
       .maybeSingle();
     if (error) {
@@ -175,7 +189,7 @@ async function ensureValidHouseholdForProfile(
     .update({ household_id: assigned })
     .eq("id", user.id)
     .select(
-      "id, email, household_id, is_admin, default_payment_method_id, default_destination_account_id",
+      "id, email, household_id, is_admin, default_payment_method_id, default_destination_account_id, category_display_limit",
     )
     .maybeSingle();
   if (error) {
@@ -193,6 +207,7 @@ function guestProfileFor(user: User): ProfileRow {
     is_admin: false,
     default_payment_method_id: "",
     default_destination_account_id: "",
+    category_display_limit: 8,
   };
 }
 
@@ -212,7 +227,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         await supabase
           .from("profiles")
           .select(
-      "id, email, household_id, is_admin, default_payment_method_id, default_destination_account_id",
+      "id, email, household_id, is_admin, default_payment_method_id, default_destination_account_id, category_display_limit",
     )
           .eq("id", userId)
           .maybeSingle(),
@@ -224,7 +239,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       return null;
     }
     console.log(data ? "[Auth] Profile found" : "[Auth] Profile not found", { userId });
-    return data ?? null;
+    if (!data) return null;
+    return normalizeProfileRow(data as ProfileRow);
   }, []);
 
   const refreshProfile = useCallback(async () => {

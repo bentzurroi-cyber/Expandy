@@ -2,22 +2,19 @@ import {
   createContext,
   useCallback,
   useContext,
-  useEffect,
   useMemo,
   useState,
   type ReactNode,
 } from "react";
 import { DEFAULT_CATEGORY_BUDGETS } from "@/data/mock";
-import { useAuth } from "@/context/AuthContext";
-import { supabase } from "@/lib/supabase";
-import { toast } from "sonner";
+import { formatYearMonth, type YearMonth } from "@/lib/month";
 
 type BudgetContextValue = {
   budgets: Record<string, number>;
-  getBudget: (categoryId: string) => number;
-  setBudget: (categoryId: string, amount: number) => void;
-  getMonthlyBudgetTotal: () => number;
-  setMonthlyBudgetTotal: (amount: number) => Promise<boolean>;
+  getBudget: (categoryId: string, ym?: YearMonth) => number;
+  setBudget: (categoryId: string, amount: number, ym?: YearMonth) => void;
+  getMonthlyBudgetTotal: (ym?: YearMonth) => number;
+  setMonthlyBudgetTotal: (amount: number, ym?: YearMonth) => Promise<boolean>;
   /**
    * When an expense category is removed: drop its budget entry.
    * If moveToCategoryId is set (user reassigned transactions), merge that budget into the target.
@@ -32,106 +29,152 @@ type BudgetContextValue = {
 
 const BudgetContext = createContext<BudgetContextValue | null>(null);
 const MONTHLY_TOTAL_KEY = "__monthly_total__";
+const STORAGE_KEY = "expandy-budgets-by-month-v1";
+
+type BudgetsByMonth = Record<string, Record<string, number>>;
+
+function previousYearMonth(ym: YearMonth): YearMonth {
+  const [yRaw, mRaw] = ym.split("-");
+  const y = Number(yRaw);
+  const m = Number(mRaw);
+  if (!Number.isFinite(y) || !Number.isFinite(m) || m < 1 || m > 12) return ym;
+  const d = new Date(y, m - 2, 1);
+  return formatYearMonth(d);
+}
+
+function readStoredBudgetsByMonth(): BudgetsByMonth {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as BudgetsByMonth;
+    if (!parsed || typeof parsed !== "object") return {};
+    return parsed;
+  } catch {
+    return {};
+  }
+}
 
 export function BudgetProvider({ children }: { children: ReactNode }) {
-  const { profile } = useAuth();
-  const [budgets, setBudgets] = useState<Record<string, number>>({});
+  const [budgetsByMonth, setBudgetsByMonth] = useState<BudgetsByMonth>(() =>
+    readStoredBudgetsByMonth(),
+  );
+  const activeMonth = formatYearMonth(new Date());
 
-  useEffect(() => {
-    async function loadBudgets() {
-      if (!profile?.household_id) {
-        setBudgets({});
-        return;
-      }
-      const { data } = await supabase
-        .from("settings")
-        .select("budget_limits")
-        .eq("household_id", profile.household_id)
-        .maybeSingle();
-      const limits = (data?.budget_limits ?? {}) as Record<string, number>;
-      setBudgets(limits);
+  const resolveMonthBudgets = useCallback(
+    (ym: YearMonth): Record<string, number> => {
+      const direct = budgetsByMonth[ym];
+      if (direct && typeof direct === "object") return direct;
+      const prev = budgetsByMonth[previousYearMonth(ym)];
+      if (prev && typeof prev === "object") return prev;
+      return {};
+    },
+    [budgetsByMonth],
+  );
+
+  const budgets = useMemo(
+    () => resolveMonthBudgets(activeMonth),
+    [resolveMonthBudgets, activeMonth],
+  );
+
+  const persistBudgets = useCallback((next: BudgetsByMonth) => {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+    } catch {
+      /* ignore */
     }
-    void loadBudgets();
-  }, [profile?.household_id]);
+  }, []);
 
   const getBudget = useCallback(
-    (categoryId: string) => budgets[categoryId] ?? DEFAULT_CATEGORY_BUDGETS[categoryId] ?? 0,
-    [budgets],
+    (categoryId: string, ym?: YearMonth) => {
+      const keyMonth = ym ?? activeMonth;
+      const scoped = resolveMonthBudgets(keyMonth);
+      return scoped[categoryId] ?? DEFAULT_CATEGORY_BUDGETS[categoryId] ?? 0;
+    },
+    [activeMonth, resolveMonthBudgets],
   );
 
-  const setBudget = useCallback((categoryId: string, amount: number) => {
-    const next = Math.max(0, Math.round(amount * 100) / 100);
-    setBudgets((prev) => {
-      const updated = { ...prev, [categoryId]: next };
-      if (profile?.household_id) {
-        void supabase.from("settings").upsert({
-          household_id: profile.household_id,
-          budget_limits: updated,
-        });
-      }
-      return updated;
-    });
-  }, [profile?.household_id]);
-
-  const getMonthlyBudgetTotal = useCallback(
-    () => budgets[MONTHLY_TOTAL_KEY] ?? 0,
-    [budgets],
-  );
-
-  const setMonthlyBudgetTotal = useCallback(async (amount: number) => {
-    const next = Math.max(0, Math.round(amount * 100) / 100);
-    const updated = { ...budgets, [MONTHLY_TOTAL_KEY]: next };
-    setBudgets(updated);
-    if (!profile?.household_id) return false;
-    const { error } = await supabase.from("settings").upsert({
-      household_id: profile.household_id,
-      budget_limits: updated,
-    });
-    if (error) {
-      toast.error("שמירת התקציב החודשי נכשלה");
-      return false;
-    }
-    return true;
-  }, [profile?.household_id, budgets]);
-
-  const mergeBudgetOnExpenseCategoryDeleted = useCallback(
-    (deletedCategoryId: string, moveToCategoryId?: string) => {
-      setBudgets((prev) => {
-        const next: Record<string, number> = { ...prev };
-        const fromStored = next[deletedCategoryId];
-        const fromDefault = DEFAULT_CATEGORY_BUDGETS[deletedCategoryId];
-        const deletedAmount =
-          typeof fromStored === "number"
-            ? fromStored
-            : typeof fromDefault === "number"
-              ? fromDefault
-              : 0;
-        delete next[deletedCategoryId];
-
-        if (
-          moveToCategoryId &&
-          moveToCategoryId !== deletedCategoryId &&
-          deletedAmount > 0
-        ) {
-          const toStored = next[moveToCategoryId];
-          const toDefault = DEFAULT_CATEGORY_BUDGETS[moveToCategoryId];
-          const base =
-            typeof toStored === "number"
-              ? toStored
-              : typeof toDefault === "number"
-                ? toDefault
-                : 0;
-          next[moveToCategoryId] =
-            Math.round((base + deletedAmount) * 100) / 100;
-        }
+  const setBudget = useCallback(
+    (categoryId: string, amount: number, ym?: YearMonth) => {
+      const keyMonth = ym ?? activeMonth;
+      const nextAmount = Math.max(0, Math.round(amount * 100) / 100);
+      setBudgetsByMonth((prev) => {
+        const base = prev[keyMonth] ?? resolveMonthBudgets(keyMonth);
+        const updatedMonth = { ...base, [categoryId]: nextAmount };
+        const next = { ...prev, [keyMonth]: updatedMonth };
+        persistBudgets(next);
         return next;
       });
     },
-    [],
+    [activeMonth, persistBudgets, resolveMonthBudgets],
+  );
+
+  const getMonthlyBudgetTotal = useCallback(
+    (ym?: YearMonth) => {
+      const keyMonth = ym ?? activeMonth;
+      const scoped = resolveMonthBudgets(keyMonth);
+      return scoped[MONTHLY_TOTAL_KEY] ?? 0;
+    },
+    [activeMonth, resolveMonthBudgets],
+  );
+
+  const setMonthlyBudgetTotal = useCallback(
+    async (amount: number, ym?: YearMonth) => {
+      const keyMonth = ym ?? activeMonth;
+      const nextAmount = Math.max(0, Math.round(amount * 100) / 100);
+      setBudgetsByMonth((prev) => {
+        const base = prev[keyMonth] ?? resolveMonthBudgets(keyMonth);
+        const updatedMonth = { ...base, [MONTHLY_TOTAL_KEY]: nextAmount };
+        const next = { ...prev, [keyMonth]: updatedMonth };
+        persistBudgets(next);
+        return next;
+      });
+      return true;
+    },
+    [activeMonth, persistBudgets, resolveMonthBudgets],
+  );
+
+  const mergeBudgetOnExpenseCategoryDeleted = useCallback(
+    (deletedCategoryId: string, moveToCategoryId?: string) => {
+      setBudgetsByMonth((prev) => {
+        const nextByMonth: BudgetsByMonth = {};
+        for (const [ym, monthBudgets] of Object.entries(prev)) {
+          const nextMonth: Record<string, number> = { ...monthBudgets };
+          const fromStored = nextMonth[deletedCategoryId];
+          const fromDefault = DEFAULT_CATEGORY_BUDGETS[deletedCategoryId];
+          const deletedAmount =
+            typeof fromStored === "number"
+              ? fromStored
+              : typeof fromDefault === "number"
+                ? fromDefault
+                : 0;
+          delete nextMonth[deletedCategoryId];
+          if (moveToCategoryId && moveToCategoryId !== deletedCategoryId && deletedAmount > 0) {
+            const toStored = nextMonth[moveToCategoryId];
+            const toDefault = DEFAULT_CATEGORY_BUDGETS[moveToCategoryId];
+            const base =
+              typeof toStored === "number"
+                ? toStored
+                : typeof toDefault === "number"
+                  ? toDefault
+                  : 0;
+            nextMonth[moveToCategoryId] = Math.round((base + deletedAmount) * 100) / 100;
+          }
+          nextByMonth[ym] = nextMonth;
+        }
+        persistBudgets(nextByMonth);
+        return nextByMonth;
+      });
+    },
+    [persistBudgets],
   );
 
   const clearAllUserData = useCallback(() => {
-    setBudgets({});
+    setBudgetsByMonth({});
+    try {
+      localStorage.removeItem(STORAGE_KEY);
+    } catch {
+      /* ignore */
+    }
   }, []);
 
   const value = useMemo(

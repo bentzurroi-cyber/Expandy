@@ -124,6 +124,13 @@ export function DashboardView({
   const [selectedYear, setSelectedYear] = useState<string>(() => String(new Date().getFullYear()));
   const [showAllCategoryGrids, setShowAllCategoryGrids] = useState(false);
   const [recentVisibleCount, setRecentVisibleCount] = useState(5);
+  const budgetMonthForView: YearMonth = useMemo(
+    () =>
+      timeframeMode === "month" && selectedMonth !== ALL_TIME
+        ? (selectedMonth as YearMonth)
+        : formatYearMonth(new Date()),
+    [ALL_TIME, selectedMonth, timeframeMode],
+  );
 
   const toggleCategoryGridExpanded = useCallback(() => {
     const y = window.scrollY;
@@ -173,7 +180,7 @@ export function DashboardView({
         .filter((e) => e.categoryId === cat.id)
         .reduce((s, e) => s + convertToILS(e.amount, e.currency, e.date), 0);
       sum += spent;
-      const budget = getBudget(cat.id) * budgetScaleMonths;
+      const budget = getBudget(cat.id, budgetMonthForView) * budgetScaleMonths;
       const pct = budget > 0 ? (spent / budget) * 100 : 0;
       const over = budget > 0 && spent > budget;
       return {
@@ -196,7 +203,7 @@ export function DashboardView({
         iconKey: r.iconKey,
       }));
     return { total: sum, rows: list, pieData: pie };
-  }, [expensesOnly, getBudget, budgets, expenseCategories, fxTick, budgetScaleMonths, lang]);
+  }, [expensesOnly, getBudget, budgets, expenseCategories, fxTick, budgetScaleMonths, lang, budgetMonthForView]);
 
   const financeSummary = useMemo(() => {
     const income = incomesOnly.reduce(
@@ -211,7 +218,7 @@ export function DashboardView({
   }, [incomesOnly, expensesOnly, fxTick]);
   const normalizedNet = Math.abs(financeSummary.net) < 0.01 ? 0 : financeSummary.net;
   const netIsZero = Math.abs(normalizedNet) < 0.01;
-  const monthlyBudgetTotal = getMonthlyBudgetTotal() * budgetScaleMonths;
+  const monthlyBudgetTotal = getMonthlyBudgetTotal(budgetMonthForView) * budgetScaleMonths;
   const monthlyBudgetRemaining = Math.max(0, monthlyBudgetTotal - financeSummary.expense);
   const monthlyBudgetOver = monthlyBudgetTotal > 0 && financeSummary.expense > monthlyBudgetTotal;
 

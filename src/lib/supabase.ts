@@ -41,4 +41,6 @@ export type ProfileRow = {
   default_payment_method_id: string;
   /** Preferred destination account for new income; empty = first in list. */
   default_destination_account_id: string;
+  /** Number of quick categories shown in expense form (1-8). */
+  category_display_limit: number;
 };

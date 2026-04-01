@@ -117,15 +117,27 @@ export function DatePickerField({
             )}
           >
             {variant === "row" ? (
-              <>
-                <div className="flex min-w-0 items-center gap-2 text-muted-foreground">
-                  <CalendarIcon className="size-4 shrink-0" />
-                  <span className="truncate">{label}</span>
-                </div>
-                <span dir="ltr" className="tabular-nums text-foreground">
-                  {value ? formatDateDDMMYYYY(value) : "—"}
-                </span>
-              </>
+              dir === "rtl" ? (
+                <>
+                  <span dir="ltr" className="tabular-nums text-foreground">
+                    {value ? formatDateDDMMYYYY(value) : "—"}
+                  </span>
+                  <div className="flex min-w-0 items-center gap-2 text-muted-foreground">
+                    <CalendarIcon className="size-4 shrink-0" />
+                    <span className="truncate">{label}</span>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="flex min-w-0 items-center gap-2 text-muted-foreground">
+                    <CalendarIcon className="size-4 shrink-0" />
+                    <span className="truncate">{label}</span>
+                  </div>
+                  <span dir="ltr" className="tabular-nums text-foreground">
+                    {value ? formatDateDDMMYYYY(value) : "—"}
+                  </span>
+                </>
+              )
             ) : (
               <>
                 <CalendarIcon className="me-2 size-4 shrink-0 text-muted-foreground" />

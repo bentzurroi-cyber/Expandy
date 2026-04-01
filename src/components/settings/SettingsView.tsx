@@ -77,6 +77,7 @@ import {
   assetRowToPayload,
   buildAssetImportRows,
   buildIncomeImportRows,
+  expenseRowToExpenseInput,
   incomeRowToExpenseInput,
   type AssetImportRow,
   type IncomeImportRow,
@@ -86,6 +87,12 @@ import {
   downloadExpenseImportTemplate,
   downloadIncomeImportTemplate,
 } from "@/lib/smartImport/templates";
+
+function isUuidLike(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    value.trim(),
+  );
+}
 
 async function countProfilesForHousehold(householdId: string): Promise<number> {
   const { count, error } = await supabase
@@ -153,6 +160,8 @@ export function SettingsView() {
     bulkImportExpenses,
     addExpenseCategory,
     addIncomeSource,
+    addDestinationAccount,
+    addPaymentMethod,
     clearAllUserData: clearExpensesData,
     updateExpenseCategory,
     deleteExpenseCategory,
@@ -164,9 +173,11 @@ export function SettingsView() {
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deleteId, setDeleteId] = useState<string | null>(null);
   const [moveToId, setMoveToId] = useState<string>("");
+  const [deleteHasTransactions, setDeleteHasTransactions] = useState(false);
   const [deleteIncomeOpen, setDeleteIncomeOpen] = useState(false);
   const [deleteIncomeId, setDeleteIncomeId] = useState<string | null>(null);
   const [moveToIncomeId, setMoveToIncomeId] = useState<string>("");
+  const [deleteIncomeHasTransactions, setDeleteIncomeHasTransactions] = useState(false);
   const [exportMode, setExportMode] = useState<"all" | "month" | "year" | "custom">("all");
   const [exportPeriod, setExportPeriod] = useState<YearMonth>(formatYearMonth(new Date()));
   const [exportYear, setExportYear] = useState<string>(String(new Date().getFullYear()));
@@ -211,6 +222,7 @@ export function SettingsView() {
   const [importLoading, setImportLoading] = useState(false);
   const [activeTab, setActiveTab] = useState<"general" | "finance" | "data">("general");
   const [monthlyBudgetDraft, setMonthlyBudgetDraft] = useState("");
+  const [budgetMonth, setBudgetMonth] = useState<YearMonth>(() => formatYearMonth(new Date()));
   const [monthlyBudgetSaveState, setMonthlyBudgetSaveState] = useState<
     "idle" | "saving" | "saved"
   >("idle");
@@ -248,24 +260,24 @@ export function SettingsView() {
   }, [profile?.household_id]);
 
   useEffect(() => {
-    const total = getMonthlyBudgetTotal();
+    const total = getMonthlyBudgetTotal(budgetMonth);
     const formatted = formatNumericInput(String(total || ""));
     setMonthlyBudgetDraft(formatted);
-  }, [getMonthlyBudgetTotal]);
+  }, [budgetMonth, getMonthlyBudgetTotal]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
       const numeric = parseNumericInput(monthlyBudgetDraft);
       const next = numeric != null && Number.isFinite(numeric) && numeric >= 0 ? numeric : 0;
-      if (Math.abs(next - getMonthlyBudgetTotal()) < 0.005) return;
+      if (Math.abs(next - getMonthlyBudgetTotal(budgetMonth)) < 0.005) return;
       setMonthlyBudgetSaveState("saving");
-      void setMonthlyBudgetTotal(next).then((ok) => {
+      void setMonthlyBudgetTotal(next, budgetMonth).then((ok) => {
         if (ok) setMonthlyBudgetSaveState("saved");
         else setMonthlyBudgetSaveState("idle");
       });
     }, 450);
     return () => window.clearTimeout(timer);
-  }, [monthlyBudgetDraft, getMonthlyBudgetTotal, setMonthlyBudgetTotal]);
+  }, [monthlyBudgetDraft, budgetMonth, getMonthlyBudgetTotal, setMonthlyBudgetTotal]);
 
   useEffect(() => {
     if (!leaveConfirmOpen) {
@@ -429,8 +441,8 @@ export function SettingsView() {
     return sorted.slice(0, 5);
   }, [sorted, showAllBudgetSettings]);
   const totalCategoryBudget = useMemo(
-    () => sorted.reduce((sum, c) => sum + getBudget(c.id), 0),
-    [sorted, getBudget],
+    () => sorted.reduce((sum, c) => sum + getBudget(c.id, budgetMonth), 0),
+    [sorted, getBudget, budgetMonth],
   );
   const monthlyBudgetTotal = useMemo(() => {
     const n = parseNumericInput(monthlyBudgetDraft);
@@ -1581,12 +1593,8 @@ export function SettingsView() {
                         aria-label={t.deleteCategory}
                         onClick={() => {
                           const count = expenseCountByCategory.get(c.id) ?? 0;
-                          if (count <= 0) {
-                            if (!window.confirm(t.deleteCategoryConfirm)) return;
-                            deleteExpenseCategory(c.id);
-                            return;
-                          }
                           setDeleteId(c.id);
+                          setDeleteHasTransactions(count > 0);
                           const fallback =
                             sorted.find((x) => x.id !== c.id)?.id ?? "";
                           setMoveToId(fallback);
@@ -1695,12 +1703,8 @@ export function SettingsView() {
                         aria-label={t.deleteCategory}
                         onClick={() => {
                           const count = incomeCountByCategory.get(c.id) ?? 0;
-                          if (count <= 0) {
-                            if (!window.confirm(t.deleteCategoryConfirm)) return;
-                            deleteIncomeSource(c.id);
-                            return;
-                          }
                           setDeleteIncomeId(c.id);
+                          setDeleteIncomeHasTransactions(count > 0);
                           const fallback =
                             sortedIncome.find((x) => x.id !== c.id)?.id ?? "";
                           setMoveToIncomeId(fallback);
@@ -1890,6 +1894,28 @@ export function SettingsView() {
         </CardHeader>
         <CardContent className="p-5">
           <div className="mb-4 rounded-xl border border-border/60 bg-background/40 p-3">
+            <div className="mb-3 space-y-1">
+              <Label htmlFor="budget-month" className="text-sm font-medium">
+                {lang === "he" ? "חודש תקציב" : "Budget month"}
+              </Label>
+              <Select value={budgetMonth} onValueChange={(v) => setBudgetMonth(v as YearMonth)}>
+                <SelectTrigger id="budget-month" className="w-full sm:w-[14rem]">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent position="popper">
+                  {exportMonthOptions.map((ym) => (
+                    <SelectItem key={`budget-${ym}`} value={ym} textValue={hebrewMonthYearLabel(ym)}>
+                      <SelectItemText>{hebrewMonthYearLabel(ym)}</SelectItemText>
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-xs leading-relaxed text-muted-foreground">
+                {lang === "he"
+                  ? "ברירת מחדל לחודש חדש: ערכי החודש הקודם, עם אפשרות עריכה מלאה."
+                  : "Default for a new month: previous month's values, fully editable."}
+              </p>
+            </div>
             <Label htmlFor="monthly-budget" className="text-sm font-medium">
               {lang === "he" ? "הגדרת תקציב חודשי" : "Monthly budget setup"}
             </Label>
@@ -1943,7 +1969,7 @@ export function SettingsView() {
             dir={dir}
           >
             {budgetRowsVisible.map((c) => {
-              const amount = getBudget(c.id);
+              const amount = getBudget(c.id, budgetMonth);
               const tint =
                 /^#[0-9a-fA-F]{6}$/.test(c.color.trim()) ? `${c.color}1A` : undefined;
               return (
@@ -1969,11 +1995,11 @@ export function SettingsView() {
                         onChange={(e) => {
                           const raw = e.target.value;
                           if (raw.trim() === "") {
-                            setBudget(c.id, 0);
+                            setBudget(c.id, 0, budgetMonth);
                             return;
                           }
                           const n = parseNumericInput(raw);
-                          if (n != null && Number.isFinite(n) && n >= 0) setBudget(c.id, n);
+                          if (n != null && Number.isFinite(n) && n >= 0) setBudget(c.id, n, budgetMonth);
                         }}
                         aria-label={`${t.settingsBudgetLabel} — ${c.name}`}
                         className={cn(
@@ -2072,41 +2098,54 @@ export function SettingsView() {
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>
-              {lang === "he"
-                ? "יש תנועות בקטגוריה"
-                : "This category has transactions"}
+              {deleteHasTransactions
+                ? lang === "he"
+                  ? "יש תנועות בקטגוריה"
+                  : "This category has transactions"
+                : lang === "he"
+                  ? "מחיקת קטגוריה"
+                  : "Delete category"}
             </AlertDialogTitle>
             <AlertDialogDescription>
-              {lang === "he"
-                ? "לאן להעביר אותן לפני המחיקה?"
-                : "Where should we move them before deleting?"}
+              {deleteHasTransactions
+                ? lang === "he"
+                  ? "לאן להעביר אותן לפני המחיקה?"
+                  : "Where should we move them before deleting?"
+                : t.deleteCategoryConfirm}
             </AlertDialogDescription>
           </AlertDialogHeader>
-          <div className="space-y-2">
-            <Label htmlFor="move-to">
-              {lang === "he" ? "העבר לקטגוריה" : "Move to category"}
-            </Label>
-            <Select value={moveToId} onValueChange={setMoveToId}>
-              <SelectTrigger id="move-to" className="w-full">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent position="popper">
-                {sorted
-                  .filter((c) => c.id !== deleteId)
-                  .map((c) => (
-                    <SelectItem key={c.id} value={c.id} textValue={c.name}>
-                      <SelectItemText>{c.name}</SelectItemText>
-                    </SelectItem>
-                  ))}
-              </SelectContent>
-            </Select>
-          </div>
+          {deleteHasTransactions ? (
+            <div className="space-y-2">
+              <Label htmlFor="move-to">
+                {lang === "he" ? "העבר לקטגוריה" : "Move to category"}
+              </Label>
+              <Select value={moveToId} onValueChange={setMoveToId}>
+                <SelectTrigger id="move-to" className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent position="popper">
+                  {sorted
+                    .filter((c) => c.id !== deleteId)
+                    .map((c) => (
+                      <SelectItem key={c.id} value={c.id} textValue={c.name}>
+                        <SelectItemText>{c.name}</SelectItemText>
+                      </SelectItem>
+                    ))}
+                </SelectContent>
+              </Select>
+            </div>
+          ) : null}
           <AlertDialogFooter>
             <AlertDialogCancel>{t.cancel}</AlertDialogCancel>
             <AlertDialogAction
               onClick={() => {
-                if (!deleteId || !moveToId) return;
-                deleteExpenseCategory(deleteId, moveToId);
+                if (!deleteId) return;
+                if (deleteHasTransactions) {
+                  if (!moveToId) return;
+                  deleteExpenseCategory(deleteId, moveToId);
+                } else {
+                  deleteExpenseCategory(deleteId);
+                }
                 setDeleteOpen(false);
               }}
             >
@@ -2241,41 +2280,54 @@ export function SettingsView() {
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>
-              {lang === "he"
-                ? "יש תנועות בקטגוריית ההכנסה"
-                : "This income category has transactions"}
+              {deleteIncomeHasTransactions
+                ? lang === "he"
+                  ? "יש תנועות בקטגוריית ההכנסה"
+                  : "This income category has transactions"
+                : lang === "he"
+                  ? "מחיקת קטגוריית הכנסה"
+                  : "Delete income category"}
             </AlertDialogTitle>
             <AlertDialogDescription>
-              {lang === "he"
-                ? "לאן להעביר אותן לפני המחיקה?"
-                : "Where should we move them before deleting?"}
+              {deleteIncomeHasTransactions
+                ? lang === "he"
+                  ? "לאן להעביר אותן לפני המחיקה?"
+                  : "Where should we move them before deleting?"
+                : t.deleteCategoryConfirm}
             </AlertDialogDescription>
           </AlertDialogHeader>
-          <div className="space-y-2">
-            <Label htmlFor="move-to-income">
-              {lang === "he" ? "העבר לקטגוריית הכנסה" : "Move to income category"}
-            </Label>
-            <Select value={moveToIncomeId} onValueChange={setMoveToIncomeId}>
-              <SelectTrigger id="move-to-income" className="w-full">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent position="popper">
-                {sortedIncome
-                  .filter((c) => c.id !== deleteIncomeId)
-                  .map((c) => (
-                    <SelectItem key={c.id} value={c.id} textValue={c.name}>
-                      <SelectItemText>{c.name}</SelectItemText>
-                    </SelectItem>
-                  ))}
-              </SelectContent>
-            </Select>
-          </div>
+          {deleteIncomeHasTransactions ? (
+            <div className="space-y-2">
+              <Label htmlFor="move-to-income">
+                {lang === "he" ? "העבר לקטגוריית הכנסה" : "Move to income category"}
+              </Label>
+              <Select value={moveToIncomeId} onValueChange={setMoveToIncomeId}>
+                <SelectTrigger id="move-to-income" className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent position="popper">
+                  {sortedIncome
+                    .filter((c) => c.id !== deleteIncomeId)
+                    .map((c) => (
+                      <SelectItem key={c.id} value={c.id} textValue={c.name}>
+                        <SelectItemText>{c.name}</SelectItemText>
+                      </SelectItem>
+                    ))}
+                </SelectContent>
+              </Select>
+            </div>
+          ) : null}
           <AlertDialogFooter>
             <AlertDialogCancel>{t.cancel}</AlertDialogCancel>
             <AlertDialogAction
               onClick={() => {
-                if (!deleteIncomeId || !moveToIncomeId) return;
-                deleteIncomeSource(deleteIncomeId, moveToIncomeId);
+                if (!deleteIncomeId) return;
+                if (deleteIncomeHasTransactions) {
+                  if (!moveToIncomeId) return;
+                  deleteIncomeSource(deleteIncomeId, moveToIncomeId);
+                } else {
+                  deleteIncomeSource(deleteIncomeId);
+                }
                 setDeleteIncomeOpen(false);
               }}
             >
@@ -2296,6 +2348,7 @@ export function SettingsView() {
           }}
           dir={dir}
           assetTypes={assetTypes}
+          onCreateAssetType={async (name: string) => addAssetType(name)}
           initialRows={importReview.rows}
           labels={{
             title: t.importReviewTitleAssets,
@@ -2349,6 +2402,7 @@ export function SettingsView() {
           destinationAccounts={destinationAccounts}
           currencyToCode={currencyToCode}
           onCreateCategory={async (name: string) => addIncomeSource(name)}
+          onCreateAccount={async (name: string) => addDestinationAccount(name)}
           initialRows={importReview.rows}
           labels={{
             title: t.importReviewTitleIncomes,
@@ -2368,6 +2422,34 @@ export function SettingsView() {
           }}
           onConfirm={async (rows) => {
             try {
+              if (user?.id) {
+                const byId = new Map(incomeSources.map((c) => [c.id, c] as const));
+                const uniqueCategoryIds = [...new Set(rows.map((r) => r.categoryId).filter(Boolean))];
+                const categoriesToUpsert = uniqueCategoryIds
+                  .filter((id): id is string => typeof id === "string" && isUuidLike(id))
+                  .map((id) => {
+                    const local = byId.get(id);
+                    const fallbackName =
+                      rows.find((r) => r.categoryId === id)?.categoryLabel?.trim() || "Imported income";
+                    return {
+                      id,
+                      user_id: user.id,
+                      type: "income" as const,
+                      name: local?.name ?? fallbackName,
+                      color: local?.color ?? "#737373",
+                      icon: local?.iconKey ?? "tag",
+                    };
+                  });
+                if (categoriesToUpsert.length) {
+                  const { error: categoriesError } = await supabase
+                    .from("categories")
+                    .upsert(categoriesToUpsert, { onConflict: "id" });
+                  if (categoriesError) {
+                    toast.error(categoriesError.message, { id: IMPORT_TOAST_ID.incomes });
+                    return { ok: false, error: categoriesError.message };
+                  }
+                }
+              }
               const inputs = rows
                 .map((r) => incomeRowToExpenseInput(r))
                 .filter((x): x is NonNullable<typeof x> => x != null);
@@ -2402,6 +2484,7 @@ export function SettingsView() {
           paymentMethods={paymentMethods}
           currencyToCode={currencyToCode}
           onCreateCategory={async (name: string) => addExpenseCategory(name)}
+          onCreateAccount={async (name: string) => addPaymentMethod(name)}
           initialRows={importReview.rows}
           labels={{
             title: lang === "he" ? "סקירת ייבוא — הוצאות" : "Review import — expenses",
@@ -2421,10 +2504,37 @@ export function SettingsView() {
           }}
           onConfirm={async (rows) => {
             try {
+              if (user?.id) {
+                const byId = new Map(expenseCategories.map((c) => [c.id, c] as const));
+                const uniqueCategoryIds = [...new Set(rows.map((r) => r.categoryId).filter(Boolean))];
+                const categoriesToUpsert = uniqueCategoryIds
+                  .filter((id): id is string => typeof id === "string" && isUuidLike(id))
+                  .map((id) => {
+                    const local = byId.get(id);
+                    const fallbackName =
+                      rows.find((r) => r.categoryId === id)?.categoryLabel?.trim() || "Imported expense";
+                    return {
+                      id,
+                      user_id: user.id,
+                      type: "expense" as const,
+                      name: local?.name ?? fallbackName,
+                      color: local?.color ?? "#737373",
+                      icon: local?.iconKey ?? "tag",
+                    };
+                  });
+                if (categoriesToUpsert.length) {
+                  const { error: categoriesError } = await supabase
+                    .from("categories")
+                    .upsert(categoriesToUpsert, { onConflict: "id" });
+                  if (categoriesError) {
+                    toast.error(categoriesError.message, { id: IMPORT_TOAST_ID.expenses });
+                    return { ok: false, error: categoriesError.message };
+                  }
+                }
+              }
               const inputs = rows
-                .map((r) => incomeRowToExpenseInput(r))
-                .filter((x): x is NonNullable<typeof x> => x != null)
-                .map((x) => ({ ...x, type: "expense" as const }));
+                .map((r) => expenseRowToExpenseInput(r))
+                .filter((x): x is NonNullable<typeof x> => x != null);
               const res = await bulkImportExpenses(inputs);
               if (res.ok) {
                 const msg =

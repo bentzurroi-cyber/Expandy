@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { AlertTriangle, CheckCircle2, Pencil } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Pencil, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -29,6 +29,7 @@ import {
   type IncomeImportRow,
 } from "@/lib/smartImport/buildRows";
 import { formatNumericInput } from "@/lib/numericInput";
+import { normalizeOptionName } from "@/lib/normalize";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 
@@ -60,6 +61,7 @@ type Props =
   | (Base & {
       mode: "assets";
       assetTypes: AssetTypeOption[];
+      onCreateAssetType?: (name: string) => Promise<string | null> | string | null;
       initialRows: AssetImportRow[];
       onConfirm: (rows: AssetImportRow[]) => Promise<{ ok: true } | { ok: false; error: string }>;
     })
@@ -69,6 +71,7 @@ type Props =
       destinationAccounts: PaymentMethod[];
       currencyToCode: (raw: string) => string;
       onCreateCategory?: (name: string) => Promise<string | null> | string | null;
+      onCreateAccount?: (name: string) => Promise<string | null> | string | null;
       initialRows: IncomeImportRow[];
       onConfirm: (rows: IncomeImportRow[]) => Promise<{ ok: true } | { ok: false; error: string }>;
     })
@@ -78,6 +81,7 @@ type Props =
       paymentMethods: PaymentMethod[];
       currencyToCode: (raw: string) => string;
       onCreateCategory?: (name: string) => Promise<string | null> | string | null;
+      onCreateAccount?: (name: string) => Promise<string | null> | string | null;
       initialRows: IncomeImportRow[];
       onConfirm: (rows: IncomeImportRow[]) => Promise<{ ok: true } | { ok: false; error: string }>;
     });
@@ -164,6 +168,22 @@ export function ImportReviewModal(props: Props) {
     [props],
   );
 
+  const bulkApplyAssetTypeLabel = useCallback(
+    (rawLabel: string, typeId: string) => {
+      if (props.mode !== "assets") return;
+      const normalized = normalizeOptionName(rawLabel);
+      if (!normalized || !typeId) return;
+      setAssetRows((prev) =>
+        prev.map((r) => {
+          const rowLabel = normalizeOptionName(r.typeLabel);
+          if (r.typeId || rowLabel !== normalized) return r;
+          return revalidateAssetRow({ ...r, typeId }, props.assetTypes);
+        }),
+      );
+    },
+    [props],
+  );
+
   const applyIncomeRow = useCallback(
     (clientId: string) => {
       if (props.mode !== "incomes" && props.mode !== "expenses") return;
@@ -186,19 +206,41 @@ export function ImportReviewModal(props: Props) {
   const bulkApplyCategoryLabel = useCallback(
     (rawLabel: string, categoryId: string) => {
       if (props.mode !== "incomes" && props.mode !== "expenses") return;
-      const normalized = rawLabel.trim().toLowerCase();
+      const normalized = normalizeOptionName(rawLabel);
       if (!normalized || !categoryId) return;
       const categories = props.mode === "incomes" ? props.incomeSources : props.expenseCategories;
       const destinations =
         props.mode === "incomes" ? props.destinationAccounts : props.paymentMethods;
-      const picked = categories.find((c) => c.id === categoryId);
-      if (!picked) return;
       setIncomeRows((prev) =>
         prev.map((r) => {
-          const rowLabel = r.categoryLabel.trim().toLowerCase();
+          const rowLabel = normalizeOptionName(r.categoryLabel);
           if (r.categoryId || rowLabel !== normalized) return r;
           return revalidateIncomeRow(
-            { ...r, categoryId: picked.id, categoryLabel: picked.name },
+            { ...r, categoryId },
+            categories,
+            destinations,
+            props.currencyToCode,
+          );
+        }),
+      );
+    },
+    [props],
+  );
+
+  const bulkApplyDestinationLabel = useCallback(
+    (rawLabel: string, destinationId: string) => {
+      if (props.mode !== "incomes" && props.mode !== "expenses") return;
+      const normalized = normalizeOptionName(rawLabel);
+      if (!normalized || !destinationId) return;
+      const categories = props.mode === "incomes" ? props.incomeSources : props.expenseCategories;
+      const destinations =
+        props.mode === "incomes" ? props.destinationAccounts : props.paymentMethods;
+      setIncomeRows((prev) =>
+        prev.map((r) => {
+          const rowLabel = normalizeOptionName(r.destinationLabel);
+          if (r.destinationId || rowLabel !== normalized) return r;
+          return revalidateIncomeRow(
+            { ...r, destinationId },
             categories,
             destinations,
             props.currencyToCode,
@@ -296,8 +338,13 @@ export function ImportReviewModal(props: Props) {
               assetTypes={props.assetTypes}
               onPatch={patchAsset}
               onApplyRow={applyAssetRow}
+              onBulkApplyTypeLabel={bulkApplyAssetTypeLabel}
+              onCreateType={props.onCreateAssetType}
               labels={labels}
               onEditRow={editAssetReadyRow}
+              onRemoveRow={(id) =>
+                setAssetRows((prev) => prev.filter((row) => row.clientId !== id))
+              }
             />
           ) : (
             <IncomesReviewBody
@@ -308,9 +355,14 @@ export function ImportReviewModal(props: Props) {
               onPatch={patchIncome}
               onApplyRow={applyIncomeRow}
               onBulkApplyCategoryLabel={bulkApplyCategoryLabel}
+              onBulkApplyDestinationLabel={bulkApplyDestinationLabel}
               onCreateCategory={props.onCreateCategory}
+              onCreateAccount={props.onCreateAccount}
               labels={labels}
               onEditRow={editIncomeReadyRow}
+              onRemoveRow={(id) =>
+                setIncomeRows((prev) => prev.filter((row) => row.clientId !== id))
+              }
             />
           )}
         </div>
@@ -347,7 +399,10 @@ function AssetsReviewBody({
   assetTypes,
   onPatch,
   onApplyRow,
+  onBulkApplyTypeLabel,
+  onCreateType,
   onEditRow,
+  onRemoveRow,
   labels,
 }: {
   ready: AssetImportRow[];
@@ -355,17 +410,229 @@ function AssetsReviewBody({
   assetTypes: AssetTypeOption[];
   onPatch: (id: string, patch: Partial<AssetImportRow>) => void;
   onApplyRow: (id: string) => void;
+  onBulkApplyTypeLabel: (rawLabel: string, typeId: string) => void;
+  onCreateType?: (name: string) => Promise<string | null> | string | null;
   onEditRow: (id: string) => void;
+  onRemoveRow: (id: string) => void;
   labels: Base["labels"];
 }) {
+  const unresolvedTypeGroups = useMemo(() => {
+    const byLabel = new Map<string, { label: string; count: number }>();
+    for (const row of attention) {
+      if (row.typeId) continue;
+      const label = row.typeLabel.trim();
+      if (!label) continue;
+      const key = normalizeOptionName(label);
+      const cur = byLabel.get(key);
+      if (cur) cur.count += 1;
+      else byLabel.set(key, { label, count: 1 });
+    }
+    return [...byLabel.values()].sort((a, b) => b.count - a.count || a.label.localeCompare(b.label, "he"));
+  }, [attention]);
+  const [bulkTypeChoice, setBulkTypeChoice] = useState<Record<string, string>>({});
+  const [bulkTypeDraft, setBulkTypeDraft] = useState<Record<string, string>>({});
+  const [bulkTypeMode, setBulkTypeMode] = useState<Record<string, "existing" | "new">>({});
+  const [creatingAllTypes, setCreatingAllTypes] = useState(false);
+  const [bulkCurrency, setBulkCurrency] = useState("ILS");
+  const [showReady, setShowReady] = useState(false);
+  const [showAttention, setShowAttention] = useState(true);
+  const isHebrew = /[\u0590-\u05FF]/.test(labels.title);
+  const createdToast = isHebrew ? "נוצר ונשמר בהצלחה" : "Created and saved successfully";
+  const missingCurrencyRows = useMemo(
+    () => attention.filter((r) => !r.currency.trim()),
+    [attention],
+  );
+
   return (
     <div className="space-y-8">
+      {unresolvedTypeGroups.length > 0 ? (
+        <section className="space-y-3 rounded-xl border border-primary/30 bg-primary/5 p-4">
+          <h3 className="text-sm font-semibold">
+            {isHebrew ? "טיפול מרוכז בסוגי נכסים לא מזוהים" : "Bulk fix for unknown asset types"}
+          </h3>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              disabled={!onCreateType || creatingAllTypes}
+              onClick={async () => {
+                if (!onCreateType) return;
+                setCreatingAllTypes(true);
+                try {
+                  for (const group of unresolvedTypeGroups) {
+                    const key = normalizeOptionName(group.label);
+                    const draftLabel = (bulkTypeDraft[key] ?? group.label).trim() || group.label;
+                    const existing = assetTypes.find(
+                      (t) => normalizeOptionName(t.name) === normalizeOptionName(draftLabel),
+                    );
+                    if (existing?.id) {
+                      onBulkApplyTypeLabel(group.label, existing.id);
+                      continue;
+                    }
+                    const createdId = await onCreateType(draftLabel);
+                    if (createdId) {
+                      onBulkApplyTypeLabel(group.label, createdId);
+                      toast.success(createdToast);
+                    }
+                  }
+                } finally {
+                  setCreatingAllTypes(false);
+                }
+              }}
+            >
+              {isHebrew ? "צור את כל הסוגים והחל" : "Create all types and apply"}
+            </Button>
+            <span className="text-xs text-muted-foreground">
+              {isHebrew
+                ? "בכמות מידע גדולה הפעולה עשויה לקחת מעט זמן."
+                : "With large datasets this action may take a little longer."}
+            </span>
+          </div>
+          <ul className="space-y-2">
+            {unresolvedTypeGroups.map((group) => {
+              const key = normalizeOptionName(group.label);
+              const choice = bulkTypeChoice[key] ?? "__none__";
+              const draftLabel = bulkTypeDraft[key] ?? group.label;
+              const mode = bulkTypeMode[key] ?? "new";
+              return (
+                <li key={key} className="rounded-lg border border-border/60 bg-background/60 p-3">
+                  <div className="mb-2 flex items-center justify-between gap-2">
+                    <p className="text-sm font-medium">{group.label}</p>
+                    <span className="text-xs text-muted-foreground">
+                      {isHebrew ? `${group.count} שורות` : `${group.count} rows`}
+                    </span>
+                  </div>
+                  <div className="mb-2 inline-flex rounded-md border border-border/70 bg-muted/20 p-0.5">
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant={mode === "existing" ? "default" : "ghost"}
+                      className="h-8"
+                      onClick={() => setBulkTypeMode((prev) => ({ ...prev, [key]: "existing" }))}
+                    >
+                      {isHebrew ? "בחר קיים" : "Pick existing"}
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant={mode === "new" ? "default" : "ghost"}
+                      className="h-8"
+                      onClick={() => setBulkTypeMode((prev) => ({ ...prev, [key]: "new" }))}
+                    >
+                      {isHebrew ? "שם חדש" : "New name"}
+                    </Button>
+                  </div>
+                  <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                    <Input
+                      value={draftLabel}
+                      onChange={(e) => {
+                        setBulkTypeMode((prev) => ({ ...prev, [key]: "new" }));
+                        setBulkTypeDraft((prev) => ({ ...prev, [key]: e.target.value }));
+                      }}
+                      placeholder={isHebrew ? "שם סוג חדש" : "New type name"}
+                      className="w-full sm:flex-1"
+                      disabled={mode !== "new"}
+                    />
+                    <Select
+                      value={choice}
+                      onValueChange={(v) => {
+                        setBulkTypeMode((prev) => ({ ...prev, [key]: "existing" }));
+                        setBulkTypeChoice((prev) => ({ ...prev, [key]: v }));
+                      }}
+                      disabled={mode !== "existing"}
+                    >
+                      <SelectTrigger className="w-full sm:flex-1">
+                        <SelectValue placeholder={isHebrew ? "בחירת סוג קיים" : "Choose existing type"} />
+                      </SelectTrigger>
+                      <SelectContent position="popper" className="z-[200]">
+                        <SelectItem value="__none__" textValue="—">
+                          <SelectItemText>—</SelectItemText>
+                        </SelectItem>
+                        {assetTypes.map((t) => (
+                          <SelectItem key={`${key}-${t.id}`} value={t.id} textValue={t.name}>
+                            <SelectItemText>{t.name}</SelectItemText>
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      disabled={mode !== "existing" || choice === "__none__"}
+                      onClick={() => onBulkApplyTypeLabel(group.label, choice)}
+                    >
+                      {isHebrew ? "החל על כל השורות" : "Apply to all rows"}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      disabled={!onCreateType || mode !== "new"}
+                      onClick={async () => {
+                        if (!onCreateType) return;
+                        const createdId = await onCreateType(draftLabel.trim() || group.label);
+                        if (createdId) {
+                          onBulkApplyTypeLabel(group.label, createdId);
+                          toast.success(createdToast);
+                        }
+                      }}
+                    >
+                      {isHebrew ? "צור סוג והחל" : "Create type & apply"}
+                    </Button>
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        </section>
+      ) : null}
+
+      {missingCurrencyRows.length > 3 ? (
+        <section className="space-y-3 rounded-xl border border-primary/30 bg-primary/5 p-4">
+          <h3 className="text-sm font-semibold">
+            {isHebrew ? "תיקון מרוכז למטבע חסר" : "Bulk fix for missing currency"}
+          </h3>
+          <p className="text-xs text-muted-foreground">
+            {isHebrew
+              ? "יש כמה שורות בלי מטבע. אפשר להגדיר מטבע אחד לכולן בלחיצה."
+              : "Several rows have no currency. You can apply one currency to all at once."}
+          </p>
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+            <Input
+              dir="ltr"
+              value={bulkCurrency}
+              onChange={(e) => setBulkCurrency(e.target.value.toUpperCase())}
+              placeholder="ILS / USD / EUR"
+              className="w-full sm:flex-1"
+            />
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={() => {
+                const next = bulkCurrency.trim().toUpperCase();
+                if (!next) return;
+                for (const row of missingCurrencyRows) {
+                  onPatch(row.clientId, { currency: next });
+                  onApplyRow(row.clientId);
+                }
+              }}
+            >
+              {isHebrew ? "החל על כל השורות החסרות" : "Apply to all missing rows"}
+            </Button>
+          </div>
+        </section>
+      ) : null}
+
       <section className="space-y-2">
-        <h3 className="flex items-center gap-2 text-sm font-semibold text-emerald-600 dark:text-emerald-400">
-          <CheckCircle2 className="size-4" aria-hidden />
-          {labels.ready} ({ready.length})
-        </h3>
-        {ready.length === 0 ? (
+        <div className="flex items-center justify-between gap-2">
+          <h3 className="flex items-center gap-2 text-sm font-semibold text-emerald-600 dark:text-emerald-400">
+            <CheckCircle2 className="size-4" aria-hidden />
+            {labels.ready} ({ready.length})
+          </h3>
+          <Button type="button" variant="ghost" size="sm" onClick={() => setShowReady((v) => !v)}>
+            {showReady ? (isHebrew ? "הסתר" : "Hide") : isHebrew ? "הצג" : "Show"}
+          </Button>
+        </div>
+        {!showReady ? null : ready.length === 0 ? (
           <p className="text-sm text-muted-foreground">—</p>
         ) : (
           <ul className="space-y-1.5 rounded-lg border border-border/70 bg-muted/20 p-3 text-sm">
@@ -385,6 +652,14 @@ function AssetsReviewBody({
                 >
                   <Pencil className="size-3.5" aria-hidden />
                 </button>
+                <button
+                  type="button"
+                  className="inline-flex items-center justify-center rounded-full border border-transparent bg-transparent p-1 text-muted-foreground transition-colors hover:border-border hover:bg-muted/40 hover:text-destructive"
+                  onClick={() => onRemoveRow(r.clientId)}
+                  aria-label={isHebrew ? "הסר שורה" : "Remove row"}
+                >
+                  <Trash2 className="size-3.5" aria-hidden />
+                </button>
               </li>
             ))}
           </ul>
@@ -392,11 +667,21 @@ function AssetsReviewBody({
       </section>
 
       <section className="space-y-3">
-        <h3 className="flex items-center gap-2 text-sm font-semibold text-amber-700 dark:text-amber-400">
-          <AlertTriangle className="size-4" aria-hidden />
-          {labels.attention} ({attention.length})
-        </h3>
-        {attention.length === 0 ? (
+        <div className="flex items-center justify-between gap-2">
+          <h3 className="flex items-center gap-2 text-sm font-semibold text-amber-700 dark:text-amber-400">
+            <AlertTriangle className="size-4" aria-hidden />
+            {labels.attention} ({attention.length})
+          </h3>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={() => setShowAttention((v) => !v)}
+          >
+            {showAttention ? (isHebrew ? "הסתר" : "Hide") : isHebrew ? "הצג" : "Show"}
+          </Button>
+        </div>
+        {!showAttention ? null : attention.length === 0 ? (
           <p className="text-sm text-muted-foreground">—</p>
         ) : (
           <ul className="space-y-4">
@@ -416,10 +701,10 @@ function AssetsReviewBody({
                 ) : null}
                 <div className="grid gap-3 sm:grid-cols-2">
                   <div className="space-y-1">
-                    <Label className="text-xs">{labels.raw} — תאריך</Label>
+                    <Label className="text-xs">תאריך</Label>
                     <DatePickerField
                       id={`asset-import-date-${r.clientId}`}
-                      label={labels.raw}
+                      label="תאריך"
                       value={r.dateIso.length >= 10 ? r.dateIso.slice(0, 10) : ""}
                       onChange={(iso) => onPatch(r.clientId, { dateIso: iso })}
                       variant="row"
@@ -475,6 +760,14 @@ function AssetsReviewBody({
                       </SelectContent>
                     </Select>
                   </div>
+                  <div className="space-y-1 sm:col-span-2">
+                    <Label className="text-xs">{isHebrew ? "שם סוג חדש" : "New type name"}</Label>
+                    <Input
+                      value={r.typeLabel}
+                      onChange={(e) => onPatch(r.clientId, { typeLabel: e.target.value, typeId: null })}
+                      placeholder={isHebrew ? "הקלידו שם סוג" : "Enter type name"}
+                    />
+                  </div>
                   <div className="space-y-1">
                     <Label className="text-xs">מטבע (קוד / סימול)</Label>
                     <Input
@@ -484,9 +777,18 @@ function AssetsReviewBody({
                     />
                   </div>
                   <div className="space-y-1 sm:col-span-2">
-                    <Button type="button" variant="secondary" onClick={() => onApplyRow(r.clientId)}>
-                      {labels.applyRow}
-                    </Button>
+                    <div className="flex flex-wrap gap-2">
+                      <Button type="button" variant="secondary" onClick={() => onApplyRow(r.clientId)}>
+                        {labels.applyRow}
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        onClick={() => onRemoveRow(r.clientId)}
+                      >
+                        {isHebrew ? "הסר שורה" : "Remove row"}
+                      </Button>
+                    </div>
                   </div>
                 </div>
               </li>
@@ -506,8 +808,11 @@ function IncomesReviewBody({
   onPatch,
   onApplyRow,
   onBulkApplyCategoryLabel,
+  onBulkApplyDestinationLabel,
   onCreateCategory,
+  onCreateAccount,
   onEditRow,
+  onRemoveRow,
   labels,
 }: {
   ready: IncomeImportRow[];
@@ -517,8 +822,11 @@ function IncomesReviewBody({
   onPatch: (id: string, patch: Partial<IncomeImportRow>) => void;
   onApplyRow: (id: string) => void;
   onBulkApplyCategoryLabel: (rawLabel: string, categoryId: string) => void;
+  onBulkApplyDestinationLabel: (rawLabel: string, destinationId: string) => void;
   onCreateCategory?: (name: string) => Promise<string | null> | string | null;
+  onCreateAccount?: (name: string) => Promise<string | null> | string | null;
   onEditRow: (id: string) => void;
+  onRemoveRow: (id: string) => void;
   labels: Base["labels"];
 }) {
   const unresolvedCategoryGroups = useMemo(() => {
@@ -527,7 +835,7 @@ function IncomesReviewBody({
       if (row.categoryId) continue;
       const label = row.categoryLabel.trim();
       if (!label) continue;
-      const key = label.toLowerCase();
+      const key = normalizeOptionName(label);
       const cur = byLabel.get(key);
       if (cur) cur.count += 1;
       else byLabel.set(key, { label, count: 1 });
@@ -535,9 +843,63 @@ function IncomesReviewBody({
     return [...byLabel.values()].sort((a, b) => b.count - a.count || a.label.localeCompare(b.label, "he"));
   }, [attention]);
   const [bulkCategoryChoice, setBulkCategoryChoice] = useState<Record<string, string>>({});
+  const [bulkCategoryDraft, setBulkCategoryDraft] = useState<Record<string, string>>({});
+  const [bulkCategoryMode, setBulkCategoryMode] = useState<
+    Record<string, "existing" | "new">
+  >({});
   const [creatingCategoryKey, setCreatingCategoryKey] = useState<string | null>(null);
   const [creatingAll, setCreatingAll] = useState(false);
+  const unresolvedDestinationGroups = useMemo(() => {
+    const byLabel = new Map<string, { label: string; count: number }>();
+    for (const row of attention) {
+      if (row.destinationId) continue;
+      const label = row.destinationLabel.trim();
+      if (!label) continue;
+      const key = normalizeOptionName(label);
+      const cur = byLabel.get(key);
+      if (cur) cur.count += 1;
+      else byLabel.set(key, { label, count: 1 });
+    }
+    return [...byLabel.values()].sort((a, b) => b.count - a.count || a.label.localeCompare(b.label, "he"));
+  }, [attention]);
+  const [bulkDestinationChoice, setBulkDestinationChoice] = useState<Record<string, string>>({});
+  const [bulkDestinationDraft, setBulkDestinationDraft] = useState<Record<string, string>>({});
+  const [bulkDestinationMode, setBulkDestinationMode] = useState<
+    Record<string, "existing" | "new">
+  >({});
+  const [creatingDestinationKey, setCreatingDestinationKey] = useState<string | null>(null);
+  const [creatingAllDestinations, setCreatingAllDestinations] = useState(false);
+  const [bulkCurrency, setBulkCurrency] = useState("ILS");
+  const [showReady, setShowReady] = useState(false);
+  const [showAttention, setShowAttention] = useState(true);
   const isHebrew = /[\u0590-\u05FF]/.test(labels.title);
+  const isIncomeMode = /income/i.test(labels.title);
+  const accountEntityHe = isIncomeMode ? "חשבונות יעד" : "אמצעי תשלום";
+  const accountEntitySingleHe = isIncomeMode ? "חשבון יעד" : "אמצעי תשלום";
+  const accountEntityEn = isIncomeMode ? "destination accounts" : "payment methods";
+  const accountEntitySingleEn = isIncomeMode ? "destination account" : "payment method";
+  const createdToast = isHebrew ? "נוצר ונשמר בהצלחה" : "Created and saved successfully";
+  const normalizeIssueText = useCallback(
+    (issue: string): string => {
+      if (isIncomeMode) return issue;
+      if (isHebrew) {
+        if (issue.includes("חשבון יעד")) return issue.replace(/חשבון יעד/g, "אמצעי תשלום");
+      } else if (/destination account/i.test(issue)) {
+        return issue.replace(/destination account/gi, "payment method");
+      }
+      return issue;
+    },
+    [isHebrew, isIncomeMode],
+  );
+  const missingCurrencyRows = useMemo(
+    () =>
+      attention.filter(
+        (r) =>
+          !r.currency.trim() ||
+          r.issues.some((issue) => issue.includes("מטבע") || /currency/i.test(issue)),
+      ),
+    [attention],
+  );
 
   return (
     <div className="space-y-8">
@@ -561,15 +923,20 @@ function IncomesReviewBody({
                 setCreatingAll(true);
                 try {
                   for (const group of unresolvedCategoryGroups) {
+                    const key = normalizeOptionName(group.label);
+                    const draftLabel = (bulkCategoryDraft[key] ?? group.label).trim() || group.label;
                     const existing = incomeSources.find(
-                      (c) => c.name.trim().toLowerCase() === group.label.trim().toLowerCase(),
+                      (c) => normalizeOptionName(c.name) === normalizeOptionName(draftLabel),
                     );
                     if (existing?.id) {
                       onBulkApplyCategoryLabel(group.label, existing.id);
                       continue;
                     }
-                    const createdId = await onCreateCategory(group.label);
-                    if (createdId) onBulkApplyCategoryLabel(group.label, createdId);
+                    const createdId = await onCreateCategory(draftLabel);
+                    if (createdId) {
+                      onBulkApplyCategoryLabel(group.label, createdId);
+                      toast.success(createdToast);
+                    }
                   }
                 } finally {
                   setCreatingAll(false);
@@ -586,24 +953,63 @@ function IncomesReviewBody({
           </div>
           <ul className="space-y-2">
             {unresolvedCategoryGroups.map((group) => {
-              const choice = bulkCategoryChoice[group.label.toLowerCase()] ?? "__none__";
+              const groupKey = normalizeOptionName(group.label);
+              const choice = bulkCategoryChoice[groupKey] ?? "__none__";
+              const draftLabel = bulkCategoryDraft[groupKey] ?? group.label;
+              const mode = bulkCategoryMode[groupKey] ?? "new";
               return (
-                <li key={group.label.toLowerCase()} className="rounded-lg border border-border/60 bg-background/60 p-3">
+                <li key={groupKey} className="rounded-lg border border-border/60 bg-background/60 p-3">
                   <div className="mb-2 flex items-center justify-between gap-2">
                     <p className="text-sm font-medium">{group.label}</p>
                     <span className="text-xs text-muted-foreground">
                       {isHebrew ? `${group.count} שורות` : `${group.count} rows`}
                     </span>
                   </div>
+                  <div className="mb-2 inline-flex rounded-md border border-border/70 bg-muted/20 p-0.5">
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant={mode === "existing" ? "default" : "ghost"}
+                      className="h-8"
+                      onClick={() =>
+                        setBulkCategoryMode((prev) => ({ ...prev, [groupKey]: "existing" }))
+                      }
+                    >
+                      {isHebrew ? "בחר קיים" : "Pick existing"}
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant={mode === "new" ? "default" : "ghost"}
+                      className="h-8"
+                      onClick={() =>
+                        setBulkCategoryMode((prev) => ({ ...prev, [groupKey]: "new" }))
+                      }
+                    >
+                      {isHebrew ? "שם חדש" : "New name"}
+                    </Button>
+                  </div>
                   <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                    <Input
+                      value={draftLabel}
+                      onChange={(e) => {
+                        setBulkCategoryMode((prev) => ({ ...prev, [groupKey]: "new" }));
+                        setBulkCategoryDraft((prev) => ({ ...prev, [groupKey]: e.target.value }));
+                      }}
+                      placeholder={isHebrew ? "שם קטגוריה חדשה" : "New category name"}
+                      className="w-full sm:flex-1"
+                      disabled={mode !== "new"}
+                    />
                     <Select
                       value={choice}
-                      onValueChange={(v) =>
+                      onValueChange={(v) => {
+                        setBulkCategoryMode((prev) => ({ ...prev, [groupKey]: "existing" }));
                         setBulkCategoryChoice((prev) => ({
                           ...prev,
-                          [group.label.toLowerCase()]: v,
-                        }))
-                      }
+                          [groupKey]: v,
+                        }));
+                      }}
+                      disabled={mode !== "existing"}
                     >
                       <SelectTrigger className="w-full sm:flex-1">
                         <SelectValue placeholder={isHebrew ? "בחירת קטגוריה קיימת" : "Choose existing category"} />
@@ -622,7 +1028,7 @@ function IncomesReviewBody({
                     <Button
                       type="button"
                       variant="secondary"
-                      disabled={choice === "__none__"}
+                      disabled={mode !== "existing" || choice === "__none__"}
                       onClick={() => onBulkApplyCategoryLabel(group.label, choice)}
                     >
                       {isHebrew ? "החל על כל השורות" : "Apply to all rows"}
@@ -630,15 +1036,16 @@ function IncomesReviewBody({
                     <Button
                       type="button"
                       variant="outline"
-                      disabled={!onCreateCategory || creatingCategoryKey === group.label.toLowerCase()}
+                      disabled={!onCreateCategory || creatingCategoryKey === groupKey || mode !== "new"}
                       onClick={async () => {
                         if (!onCreateCategory) return;
-                        const key = group.label.toLowerCase();
+                        const key = groupKey;
                         setCreatingCategoryKey(key);
                         try {
-                          const createdId = await onCreateCategory(group.label);
+                          const createdId = await onCreateCategory(draftLabel.trim() || group.label);
                           if (createdId) {
                             onBulkApplyCategoryLabel(group.label, createdId);
+                            toast.success(createdToast);
                           }
                         } finally {
                           setCreatingCategoryKey((cur) => (cur === key ? null : cur));
@@ -655,12 +1062,207 @@ function IncomesReviewBody({
         </section>
       ) : null}
 
+      {unresolvedDestinationGroups.length > 0 ? (
+        <section className="space-y-3 rounded-xl border border-primary/30 bg-primary/5 p-4">
+          <h3 className="text-sm font-semibold">
+            {isHebrew
+              ? `טיפול מרוכז ב${accountEntityHe} לא מזוהים`
+              : `Bulk fix for unknown ${accountEntityEn}`}
+          </h3>
+          <p className="text-xs text-muted-foreground">
+            {isHebrew
+              ? `בחרו ${accountEntitySingleHe} קיים או צרו ${accountEntitySingleHe} חדש - והשיוך יחול אוטומטית על כל השורות עם אותו שם.`
+              : `Choose an existing ${accountEntitySingleEn} or create a new one, and apply it to all rows with the same label.`}
+          </p>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              disabled={!onCreateAccount || creatingAllDestinations}
+              onClick={async () => {
+                if (!onCreateAccount) return;
+                setCreatingAllDestinations(true);
+                try {
+                  for (const group of unresolvedDestinationGroups) {
+                    const key = normalizeOptionName(group.label);
+                    const draftLabel = (bulkDestinationDraft[key] ?? group.label).trim() || group.label;
+                    const existing = destinationAccounts.find(
+                      (d) => normalizeOptionName(d.name) === normalizeOptionName(draftLabel),
+                    );
+                    if (existing?.id) {
+                      onBulkApplyDestinationLabel(group.label, existing.id);
+                      continue;
+                    }
+                    const createdId = await onCreateAccount(draftLabel);
+                    if (createdId) {
+                      onBulkApplyDestinationLabel(group.label, createdId);
+                      toast.success(createdToast);
+                    }
+                  }
+                } finally {
+                  setCreatingAllDestinations(false);
+                }
+              }}
+            >
+              {isHebrew
+                ? `צור את כל ה${accountEntityHe} והחל`
+                : `Create all ${accountEntityEn} and apply`}
+            </Button>
+          </div>
+          <ul className="space-y-2">
+            {unresolvedDestinationGroups.map((group) => {
+              const groupKey = normalizeOptionName(group.label);
+              const choice = bulkDestinationChoice[groupKey] ?? "__none__";
+              const draftLabel = bulkDestinationDraft[groupKey] ?? group.label;
+              const mode = bulkDestinationMode[groupKey] ?? "new";
+              return (
+                <li key={groupKey} className="rounded-lg border border-border/60 bg-background/60 p-3">
+                  <div className="mb-2 flex items-center justify-between gap-2">
+                    <p className="text-sm font-medium">{group.label}</p>
+                    <span className="text-xs text-muted-foreground">
+                      {isHebrew ? `${group.count} שורות` : `${group.count} rows`}
+                    </span>
+                  </div>
+                  <div className="mb-2 inline-flex rounded-md border border-border/70 bg-muted/20 p-0.5">
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant={mode === "existing" ? "default" : "ghost"}
+                      className="h-8"
+                      onClick={() =>
+                        setBulkDestinationMode((prev) => ({ ...prev, [groupKey]: "existing" }))
+                      }
+                    >
+                      {isHebrew ? "בחר קיים" : "Pick existing"}
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant={mode === "new" ? "default" : "ghost"}
+                      className="h-8"
+                      onClick={() => setBulkDestinationMode((prev) => ({ ...prev, [groupKey]: "new" }))}
+                    >
+                      {isHebrew ? "שם חדש" : "New name"}
+                    </Button>
+                  </div>
+                  <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                    <Input
+                      value={draftLabel}
+                      onChange={(e) => {
+                        setBulkDestinationMode((prev) => ({ ...prev, [groupKey]: "new" }));
+                        setBulkDestinationDraft((prev) => ({ ...prev, [groupKey]: e.target.value }));
+                      }}
+                      placeholder={isHebrew ? "שם חשבון חדש" : "New account name"}
+                      className="w-full sm:flex-1"
+                      disabled={mode !== "new"}
+                    />
+                    <Select
+                      value={choice}
+                      onValueChange={(v) => {
+                        setBulkDestinationMode((prev) => ({ ...prev, [groupKey]: "existing" }));
+                        setBulkDestinationChoice((prev) => ({ ...prev, [groupKey]: v }));
+                      }}
+                      disabled={mode !== "existing"}
+                    >
+                      <SelectTrigger className="w-full sm:flex-1">
+                        <SelectValue placeholder={isHebrew ? "בחירת חשבון קיים" : "Choose existing account"} />
+                      </SelectTrigger>
+                      <SelectContent position="popper" className="z-[200]">
+                        <SelectItem value="__none__" textValue="—">
+                          <SelectItemText>—</SelectItemText>
+                        </SelectItem>
+                        {destinationAccounts.map((d) => (
+                          <SelectItem key={`${group.label}-${d.id}`} value={d.id} textValue={d.name}>
+                            <SelectItemText>{d.name}</SelectItemText>
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      disabled={mode !== "existing" || choice === "__none__"}
+                      onClick={() => onBulkApplyDestinationLabel(group.label, choice)}
+                    >
+                      {isHebrew ? "החל על כל השורות" : "Apply to all rows"}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      disabled={!onCreateAccount || creatingDestinationKey === groupKey || mode !== "new"}
+                      onClick={async () => {
+                        if (!onCreateAccount) return;
+                        setCreatingDestinationKey(groupKey);
+                        try {
+                          const createdId = await onCreateAccount(draftLabel.trim() || group.label);
+                          if (createdId) {
+                            onBulkApplyDestinationLabel(group.label, createdId);
+                            toast.success(createdToast);
+                          }
+                        } finally {
+                          setCreatingDestinationKey((cur) => (cur === groupKey ? null : cur));
+                        }
+                      }}
+                    >
+                      {isHebrew
+                        ? `צור ${accountEntitySingleHe} והחל`
+                        : `Create ${accountEntitySingleEn} & apply`}
+                    </Button>
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        </section>
+      ) : null}
+
+      {missingCurrencyRows.length > 3 ? (
+        <section className="space-y-3 rounded-xl border border-primary/30 bg-primary/5 p-4">
+          <h3 className="text-sm font-semibold">
+            {isHebrew ? "תיקון מרוכז למטבע חסר" : "Bulk fix for missing currency"}
+          </h3>
+          <p className="text-xs text-muted-foreground">
+            {isHebrew
+              ? "יש כמה שורות בלי מטבע. אפשר להגדיר מטבע אחד לכולן בלחיצה."
+              : "Several rows have no currency. You can apply one currency to all at once."}
+          </p>
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+            <Input
+              dir="ltr"
+              value={bulkCurrency}
+              onChange={(e) => setBulkCurrency(e.target.value.toUpperCase())}
+              placeholder="ILS / USD / EUR"
+              className="w-full sm:flex-1"
+            />
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={() => {
+                const next = bulkCurrency.trim().toUpperCase();
+                if (!next) return;
+                for (const row of missingCurrencyRows) {
+                  onPatch(row.clientId, { currency: next });
+                  onApplyRow(row.clientId);
+                }
+              }}
+            >
+              {isHebrew ? "החל על כל השורות החסרות" : "Apply to all missing rows"}
+            </Button>
+          </div>
+        </section>
+      ) : null}
+
       <section className="space-y-2">
-        <h3 className="flex items-center gap-2 text-sm font-semibold text-emerald-600 dark:text-emerald-400">
-          <CheckCircle2 className="size-4" aria-hidden />
-          {labels.ready} ({ready.length})
-        </h3>
-        {ready.length === 0 ? (
+        <div className="flex items-center justify-between gap-2">
+          <h3 className="flex items-center gap-2 text-sm font-semibold text-emerald-600 dark:text-emerald-400">
+            <CheckCircle2 className="size-4" aria-hidden />
+            {labels.ready} ({ready.length})
+          </h3>
+          <Button type="button" variant="ghost" size="sm" onClick={() => setShowReady((v) => !v)}>
+            {showReady ? (isHebrew ? "הסתר" : "Hide") : isHebrew ? "הצג" : "Show"}
+          </Button>
+        </div>
+        {!showReady ? null : ready.length === 0 ? (
           <p className="text-sm text-muted-foreground">—</p>
         ) : (
           <ul className="space-y-1.5 rounded-lg border border-border/70 bg-muted/20 p-3 text-sm">
@@ -681,6 +1283,14 @@ function IncomesReviewBody({
                 >
                   <Pencil className="size-3.5" aria-hidden />
                 </button>
+                <button
+                  type="button"
+                  className="inline-flex items-center justify-center rounded-full border border-transparent bg-transparent p-1 text-muted-foreground transition-colors hover:border-border hover:bg-muted/40 hover:text-destructive"
+                  onClick={() => onRemoveRow(r.clientId)}
+                  aria-label={isHebrew ? "הסר שורה" : "Remove row"}
+                >
+                  <Trash2 className="size-3.5" aria-hidden />
+                </button>
               </li>
             ))}
           </ul>
@@ -688,11 +1298,21 @@ function IncomesReviewBody({
       </section>
 
       <section className="space-y-3">
-        <h3 className="flex items-center gap-2 text-sm font-semibold text-amber-700 dark:text-amber-400">
-          <AlertTriangle className="size-4" aria-hidden />
-          {labels.attention} ({attention.length})
-        </h3>
-        {attention.length === 0 ? (
+        <div className="flex items-center justify-between gap-2">
+          <h3 className="flex items-center gap-2 text-sm font-semibold text-amber-700 dark:text-amber-400">
+            <AlertTriangle className="size-4" aria-hidden />
+            {labels.attention} ({attention.length})
+          </h3>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={() => setShowAttention((v) => !v)}
+          >
+            {showAttention ? (isHebrew ? "הסתר" : "Hide") : isHebrew ? "הצג" : "Show"}
+          </Button>
+        </div>
+        {!showAttention ? null : attention.length === 0 ? (
           <p className="text-sm text-muted-foreground">—</p>
         ) : (
           <ul className="space-y-4">
@@ -709,7 +1329,7 @@ function IncomesReviewBody({
                 </pre>
                 {r.issues.length > 0 ? (
                   <p className="mb-3 text-xs text-destructive">
-                    {labels.issues}: {r.issues.join(" · ")}
+                    {labels.issues}: {r.issues.map(normalizeIssueText).join(" · ")}
                   </p>
                 ) : null}
                 <div className="grid gap-3 sm:grid-cols-2">
@@ -717,7 +1337,7 @@ function IncomesReviewBody({
                     <Label className="text-xs">תאריך</Label>
                     <DatePickerField
                       id={`income-import-date-${r.clientId}`}
-                      label={labels.raw}
+                      label="תאריך"
                       value={r.dateIso.length >= 10 ? r.dateIso.slice(0, 10) : ""}
                       onChange={(iso) => onPatch(r.clientId, { dateIso: iso })}
                       variant="row"
@@ -779,6 +1399,19 @@ function IncomesReviewBody({
                     </Select>
                   </div>
                   <div className="space-y-1 sm:col-span-2">
+                    <Label className="text-xs">{isHebrew ? "שם קטגוריה חדש" : "New category name"}</Label>
+                    <Input
+                      value={r.categoryLabel}
+                      onChange={(e) =>
+                        onPatch(r.clientId, {
+                          categoryLabel: e.target.value,
+                          categoryId: null,
+                        })
+                      }
+                      placeholder={isHebrew ? "הקלידו שם קטגוריה" : "Enter category name"}
+                    />
+                  </div>
+                  <div className="space-y-1 sm:col-span-2">
                     <Label className="text-xs">{labels.accountLabel}</Label>
                     <Select
                       value={r.destinationId ?? "__none__"}
@@ -811,9 +1444,18 @@ function IncomesReviewBody({
                     <Input value={r.note} onChange={(e) => onPatch(r.clientId, { note: e.target.value })} />
                   </div>
                   <div className="space-y-1 sm:col-span-2">
-                    <Button type="button" variant="secondary" onClick={() => onApplyRow(r.clientId)}>
-                      {labels.applyRow}
-                    </Button>
+                    <div className="flex flex-wrap gap-2">
+                      <Button type="button" variant="secondary" onClick={() => onApplyRow(r.clientId)}>
+                        {labels.applyRow}
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        onClick={() => onRemoveRow(r.clientId)}
+                      >
+                        {isHebrew ? "הסר שורה" : "Remove row"}
+                      </Button>
+                    </div>
                   </div>
                 </div>
               </li>

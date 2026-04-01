@@ -78,6 +78,8 @@ export function resolveIncomeColumns(keys: string[]): {
     (n) => n.includes("יעד") || n.includes("destination"),
     (n) => n.includes("חשבון") && (n.includes("יעד") || n.includes("הפקדה")),
     has("אמצעי"),
+    has("אופן", "תשלום"),
+    (n) => n.includes("payment") && (n.includes("type") || n.includes("mode")),
     (n) => n.includes("payment") && (n.includes("account") || n.includes("method")),
     has("שיטת"),
   ]);

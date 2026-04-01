@@ -256,6 +256,31 @@ export function incomeRowToExpenseInput(
   };
 }
 
+export function expenseRowToExpenseInput(
+  row: IncomeImportRow,
+): Omit<
+  import("@/data/mock").Expense,
+  "id"
+> | null {
+  const iso = parseImportDateToIso(row.dateIso) ?? row.dateIso;
+  if (!isValidIso(iso)) return null;
+  const amt = parseAmountToNumber(row.amount);
+  if (amt == null || !Number.isFinite(amt) || amt <= 0) return null;
+  if (!row.categoryId || !row.destinationId) return null;
+  return {
+    date: iso,
+    amount: Math.round(Math.abs(amt) * 100) / 100,
+    currency: row.currency,
+    categoryId: row.categoryId,
+    paymentMethodId: row.destinationId,
+    note: row.note,
+    type: "expense",
+    installments: 1,
+    installmentIndex: 1,
+    recurringMonthly: false,
+  };
+}
+
 function isValidIso(s: string): boolean {
   return /^\d{4}-\d{2}-\d{2}$/.test(s);
 }

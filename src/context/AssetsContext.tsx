@@ -16,6 +16,7 @@ import {
   type AssetSnapshot,
 } from "@/data/mock";
 import { formatYearMonth, type YearMonth } from "@/lib/month";
+import { pickDistinctImportCategoryColor } from "@/lib/categoryColors";
 import { useAuth } from "@/context/AuthContext";
 import { supabase } from "@/lib/supabase";
 import { isValidHouseholdCode, normalizeHouseholdCode } from "@/lib/household";
@@ -71,6 +72,12 @@ function newId(): string {
   } catch {
     return `asset-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
   }
+}
+
+function isUuidLike(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    value.trim(),
+  );
 }
 
 function normalizeTypeId(name: string): string {
@@ -349,7 +356,8 @@ export function AssetsProvider({ children }: { children: ReactNode }) {
     let id = normalizeTypeId(n);
     const exists = new Set(assetTypes.map((t) => t.id));
     while (exists.has(id)) id = `${id}-${Math.floor(Math.random() * 10000)}`;
-    setAssetTypes((prev) => [...prev, { id, name: n, color: "#94a3b8" }]);
+    const nextColor = pickDistinctImportCategoryColor(assetTypes.map((t) => t.color));
+    setAssetTypes((prev) => [...prev, { id, name: n, color: nextColor }]);
     return id;
   }, [assetTypes]);
 
@@ -597,6 +605,26 @@ export function AssetsProvider({ children }: { children: ReactNode }) {
           return { ok: false as const, error: "אין חיבור לענן. נסה שוב בעוד רגע." };
         }
         const ctx = persistCtx;
+        const typeById = new Map(assetTypes.map((t) => [t.id, t] as const));
+        const typeRows = [...new Set(rows.map((r) => r.type.trim()).filter(Boolean))].map((typeId) => {
+          const local = typeById.get(typeId);
+          return {
+            ...(isUuidLike(typeId) ? { id: typeId } : {}),
+            user_id: ctx.userId,
+            type: "asset" as const,
+            name: local?.name ?? typeId,
+            color: local?.color ?? "#94a3b8",
+            icon: "tag",
+          };
+        });
+        if (typeRows.length) {
+          const { error: typeUpsertError } = await supabase
+            .from("categories")
+            .upsert(typeRows, { onConflict: "user_id,name,type" });
+          if (typeUpsertError) {
+            return { ok: false as const, error: typeUpsertError.message };
+          }
+        }
         const inserts: Array<{ ym: YearMonth; account: AssetAccount }> = [];
         const dbRows: Array<Record<string, unknown>> = [];
         for (const r of rows) {
@@ -677,7 +705,7 @@ export function AssetsProvider({ children }: { children: ReactNode }) {
         };
       }
     },
-    [persistCtx, registerAssetName],
+    [persistCtx, registerAssetName, assetTypes],
   );
 
   const value = useMemo(
