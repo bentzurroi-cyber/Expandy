@@ -133,7 +133,6 @@ async function upsertAssetRow(
   acc: AssetAccount,
 ): Promise<{ error: string } | null> {
   if (!ctx || !isValidHouseholdCode(ctx.householdId)) {
-    console.error("Missing household_id. Cannot save data.");
     return { error: "Missing household_id. Cannot save data." };
   }
   const rowId = rowIdForMonth(acc.id, ym);
@@ -151,12 +150,10 @@ async function upsertAssetRow(
   try {
     const { error } = await supabase.from("assets").upsert(row, { onConflict: "id" });
     if (error) {
-      console.error(error);
       showSupabaseInsertError(error);
       return { error: error.message };
     }
   } catch (error) {
-    console.error(error);
     showSupabaseInsertError(error);
     return { error: error instanceof Error ? error.message : "Asset upsert failed" };
   }
@@ -166,14 +163,12 @@ async function upsertAssetRow(
 async function deleteAssetRowsFromDb(ctx: PersistCtx | null, accountId: string) {
   if (!ctx || !isValidHouseholdCode(ctx.householdId)) return;
   const base = assetBaseId(accountId);
-  const { error: e1 } = await supabase.from("assets").delete().eq("id", base).eq("household_id", ctx.householdId);
-  if (e1) console.error("[Assets] delete legacy id failed", e1);
-  const { error: e2 } = await supabase
+  await supabase.from("assets").delete().eq("id", base).eq("household_id", ctx.householdId);
+  await supabase
     .from("assets")
     .delete()
     .eq("household_id", ctx.householdId)
     .like("id", `${base}__%`);
-  if (e2) console.error("[Assets] delete by prefix failed", e2);
 }
 
 async function updateAssetMetaInDb(
@@ -189,7 +184,6 @@ async function updateAssetMetaInDb(
     .eq("household_id", ctx.householdId)
     .or(`id.eq.${base},id.like.${base}__%`);
   if (selErr) {
-    console.error("[Assets] meta select failed", selErr);
     return;
   }
   const updates: Record<string, string | null> = {};
@@ -198,8 +192,7 @@ async function updateAssetMetaInDb(
   for (const r of data ?? []) {
     const id = String((r as { id?: string }).id ?? "");
     if (!id) continue;
-    const { error } = await supabase.from("assets").update(updates).eq("id", id);
-    if (error) console.error("[Assets] meta update failed", error);
+    await supabase.from("assets").update(updates).eq("id", id);
   }
 }
 
@@ -216,14 +209,12 @@ async function updateAssetTypeInDb(
     .eq("household_id", ctx.householdId)
     .or(`id.eq.${base},id.like.${base}__%`);
   if (selErr) {
-    console.error("[Assets] type select failed", selErr);
     return;
   }
   for (const r of data ?? []) {
     const id = String((r as { id?: string }).id ?? "");
     if (!id) continue;
-    const { error } = await supabase.from("assets").update({ type: newType }).eq("id", id);
-    if (error) console.error("[Assets] type update failed", error);
+    await supabase.from("assets").update({ type: newType }).eq("id", id);
   }
 }
 
@@ -254,9 +245,6 @@ export function AssetsProvider({ children }: { children: ReactNode }) {
     }
     const hm = normalizeHouseholdCode(profile?.household_id ?? "");
     if (!isValidHouseholdCode(hm)) {
-      console.log("[Assets] Skipping fetch until household_id is ready", {
-        householdId: hm,
-      });
       return;
     }
     try {
@@ -264,9 +252,7 @@ export function AssetsProvider({ children }: { children: ReactNode }) {
         .from("assets")
         .select("id, name, type, balance, date, color, currency")
         .eq("household_id", hm);
-      console.log("Fetch Result:", data, "Fetch Error:", error);
       if (error) {
-        console.error("SELECT ERROR:", error.message);
         return;
       }
       if (!data) return;
@@ -291,8 +277,8 @@ export function AssetsProvider({ children }: { children: ReactNode }) {
         .map(([ym, accounts]) => ({ ym: ym as YearMonth, accounts }))
         .sort((a, b) => a.ym.localeCompare(b.ym));
       setSnapshots(nextSnapshots);
-    } catch (error) {
-      console.error("SELECT ERROR:", error);
+    } catch {
+      /* ignore load failures */
     }
   }, [authLoading, profile?.household_id, session, user?.id]);
 
@@ -464,9 +450,7 @@ export function AssetsProvider({ children }: { children: ReactNode }) {
           );
         }
         const acc = findAccountInSnapshot(next, currentMonth, id);
-        if (acc) void upsertAssetRow(persistCtx, currentMonth, acc).then((e) => {
-          if (e) console.error("[Assets] persist balance failed", e.error);
-        });
+        if (acc) void upsertAssetRow(persistCtx, currentMonth, acc);
         return next;
       });
     },
@@ -499,9 +483,7 @@ export function AssetsProvider({ children }: { children: ReactNode }) {
           );
         }
         const acc = findAccountInSnapshot(next, currentMonth, id);
-        if (acc) void upsertAssetRow(persistCtx, currentMonth, acc).then((e) => {
-          if (e) console.error("[Assets] persist currency failed", e.error);
-        });
+        if (acc) void upsertAssetRow(persistCtx, currentMonth, acc);
         return next;
       });
     },
@@ -562,7 +544,6 @@ export function AssetsProvider({ children }: { children: ReactNode }) {
   const addSnapshotAccount = useCallback(
     async (ym: YearMonth, input: Omit<AssetAccount, "id">) => {
       if (!persistCtx || !isValidHouseholdCode(persistCtx.householdId)) {
-        console.error("Missing household_id. Cannot save data.");
         return { ok: false as const, error: "אין חיבור לענן. נסה שוב בעוד רגע." };
       }
       const base = newId();
@@ -613,7 +594,6 @@ export function AssetsProvider({ children }: { children: ReactNode }) {
       try {
         if (!rows.length) return { ok: true as const, count: 0 };
         if (!persistCtx) {
-        console.error("Missing household_id. Cannot save data.");
           return { ok: false as const, error: "אין חיבור לענן. נסה שוב בעוד רגע." };
         }
         const ctx = persistCtx;
@@ -661,7 +641,6 @@ export function AssetsProvider({ children }: { children: ReactNode }) {
         try {
           const { error } = await supabase.from("assets").insert(dbRows);
           if (error) {
-            console.error(error);
             showSupabaseInsertError(error);
             setSnapshots((prev) =>
               prev.map((s) => ({
@@ -672,7 +651,6 @@ export function AssetsProvider({ children }: { children: ReactNode }) {
             return { ok: false as const, error: error.message };
           }
         } catch (error) {
-          console.error(error);
           showSupabaseInsertError(error);
           setSnapshots((prev) =>
             prev.map((s) => ({
@@ -690,7 +668,6 @@ export function AssetsProvider({ children }: { children: ReactNode }) {
         }
         return { ok: true as const, count: inserts.length };
       } catch (err) {
-        console.error("[Assets] bulkImportAssets crashed", err);
         return {
           ok: false as const,
           error:

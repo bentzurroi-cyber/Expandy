@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Download, Lightbulb, Pencil, Trash2 } from "lucide-react";
+import { ChevronDown, Download, Lightbulb, Pencil, Trash2 } from "lucide-react";
 import { downloadExpensesCsv, type CsvLookup } from "@/lib/exportCsv";
 import { Button } from "@/components/ui/button";
 import {
@@ -1098,41 +1098,26 @@ export function SettingsView() {
             className="hidden"
             onChange={(e) => onPickImportExpenses(e.target.files?.[0] ?? null)}
           />
-          <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-start">
-            <div className="flex min-w-0 flex-1 flex-col gap-2">
+          <details className="group rounded-xl border border-border/60 bg-background/40 p-3">
+            <summary className="flex cursor-pointer list-none items-center justify-between gap-2 text-sm font-medium text-foreground [&::-webkit-details-marker]:hidden">
+              <span>{lang === "he" ? "הוצאות" : "Expense categories"}</span>
+              <ChevronDown
+                className="size-4 shrink-0 text-muted-foreground transition-transform group-open:rotate-180"
+                aria-hidden
+              />
+            </summary>
+            <div className="mt-3 space-y-3">
               <Button
                 type="button"
                 variant="outline"
-                className="w-full sm:w-auto"
-                onClick={() => importAssetsInputRef.current?.click()}
-              >
-                {t.importAssets}
-              </Button>
-              <button
-                type="button"
-                className="text-start text-sm text-muted-foreground underline hover:text-foreground"
-                onClick={() => downloadAssetImportTemplate()}
-              >
-                {t.importExampleFormat}
-              </button>
-              <p className="text-xs leading-relaxed text-muted-foreground">
-                {lang === "he"
-                  ? "עמודות נדרשות: תאריך, סכום, שם, סוג (סוג נכס), מטבע (אופציונלי)."
-                  : "Required columns: Date, Amount, Name, Type (asset type), Currency (optional)."}
-              </p>
-            </div>
-            <div className="flex min-w-0 flex-1 flex-col gap-2">
-              <Button
-                type="button"
-                variant="outline"
-                className="w-full sm:w-auto"
+                className="w-full"
                 onClick={() => importExpensesInputRef.current?.click()}
               >
                 {lang === "he" ? "ייבוא הוצאות" : "Import expenses"}
               </Button>
               <button
                 type="button"
-                className="text-start text-sm text-muted-foreground underline hover:text-foreground"
+                className="w-full text-start text-sm text-muted-foreground underline decoration-muted-foreground/60 underline-offset-2 hover:text-foreground"
                 onClick={() => downloadExpenseImportTemplate()}
               >
                 {t.importExampleFormat}
@@ -1143,18 +1128,27 @@ export function SettingsView() {
                   : "Required columns: Date, Amount, Currency, Category, Payment method, Notes (optional)."}
               </p>
             </div>
-            <div className="flex min-w-0 flex-1 flex-col gap-2">
+          </details>
+          <details className="group rounded-xl border border-border/60 bg-background/40 p-3">
+            <summary className="flex cursor-pointer list-none items-center justify-between gap-2 text-sm font-medium text-foreground [&::-webkit-details-marker]:hidden">
+              <span>{lang === "he" ? "הכנסות" : "Income categories"}</span>
+              <ChevronDown
+                className="size-4 shrink-0 text-muted-foreground transition-transform group-open:rotate-180"
+                aria-hidden
+              />
+            </summary>
+            <div className="mt-3 space-y-3">
               <Button
                 type="button"
                 variant="outline"
-                className="w-full sm:w-auto"
+                className="w-full"
                 onClick={() => importIncomesInputRef.current?.click()}
               >
                 {t.importIncomes}
               </Button>
               <button
                 type="button"
-                className="text-start text-sm text-muted-foreground underline hover:text-foreground"
+                className="w-full text-start text-sm text-muted-foreground underline decoration-muted-foreground/60 underline-offset-2 hover:text-foreground"
                 onClick={() => downloadIncomeImportTemplate()}
               >
                 {t.importExampleFormat}
@@ -1165,7 +1159,38 @@ export function SettingsView() {
                   : "Required columns: Date, Amount, Currency, Category, Destination account, Notes (optional)."}
               </p>
             </div>
-          </div>
+          </details>
+          <details className="group rounded-xl border border-border/60 bg-background/40 p-3">
+            <summary className="flex cursor-pointer list-none items-center justify-between gap-2 text-sm font-medium text-foreground [&::-webkit-details-marker]:hidden">
+              <span>{lang === "he" ? "סוגי נכסים" : "Asset types"}</span>
+              <ChevronDown
+                className="size-4 shrink-0 text-muted-foreground transition-transform group-open:rotate-180"
+                aria-hidden
+              />
+            </summary>
+            <div className="mt-3 space-y-3">
+              <Button
+                type="button"
+                variant="outline"
+                className="w-full"
+                onClick={() => importAssetsInputRef.current?.click()}
+              >
+                {t.importAssets}
+              </Button>
+              <button
+                type="button"
+                className="w-full text-start text-sm text-muted-foreground underline decoration-muted-foreground/60 underline-offset-2 hover:text-foreground"
+                onClick={() => downloadAssetImportTemplate()}
+              >
+                {t.importExampleFormat}
+              </button>
+              <p className="text-xs leading-relaxed text-muted-foreground">
+                {lang === "he"
+                  ? "עמודות נדרשות: תאריך, סכום, שם, סוג (סוג נכס), מטבע (אופציונלי)."
+                  : "Required columns: Date, Amount, Name, Type (asset type), Currency (optional)."}
+              </p>
+            </div>
+          </details>
         </CardContent>
       </Card>
       ) : null}
@@ -1479,9 +1504,13 @@ export function SettingsView() {
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
-          <details className="rounded-xl border border-border/60 bg-background/40 p-3">
-            <summary className="cursor-pointer text-sm font-medium">
-              {lang === "he" ? "הוצאות" : "Expense categories"}
+          <details className="group rounded-xl border border-border/60 bg-background/40 p-3">
+            <summary className="flex cursor-pointer list-none items-center justify-between gap-2 text-sm font-medium text-foreground [&::-webkit-details-marker]:hidden">
+              <span>{lang === "he" ? "הוצאות" : "Expense categories"}</span>
+              <ChevronDown
+                className="size-4 shrink-0 text-muted-foreground transition-transform group-open:rotate-180"
+                aria-hidden
+              />
             </summary>
             <div className="mt-3 space-y-4">
           <SortableSettingsCategoryList
@@ -1591,9 +1620,13 @@ export function SettingsView() {
           ) : null}
             </div>
           </details>
-          <details className="rounded-xl border border-border/60 bg-background/40 p-3">
-            <summary className="cursor-pointer text-sm font-medium">
-              {lang === "he" ? "הכנסות" : "Income categories"}
+          <details className="group rounded-xl border border-border/60 bg-background/40 p-3">
+            <summary className="flex cursor-pointer list-none items-center justify-between gap-2 text-sm font-medium text-foreground [&::-webkit-details-marker]:hidden">
+              <span>{lang === "he" ? "הכנסות" : "Income categories"}</span>
+              <ChevronDown
+                className="size-4 shrink-0 text-muted-foreground transition-transform group-open:rotate-180"
+                aria-hidden
+              />
             </summary>
             <div className="mt-3 space-y-4">
           <SortableSettingsCategoryList
@@ -1701,9 +1734,13 @@ export function SettingsView() {
           ) : null}
             </div>
           </details>
-          <details className="rounded-xl border border-border/60 bg-background/40 p-3">
-            <summary className="cursor-pointer text-sm font-medium">
-              {lang === "he" ? "סוגי נכסים" : "Asset types"}
+          <details className="group rounded-xl border border-border/60 bg-background/40 p-3">
+            <summary className="flex cursor-pointer list-none items-center justify-between gap-2 text-sm font-medium text-foreground [&::-webkit-details-marker]:hidden">
+              <span>{lang === "he" ? "סוגי נכסים" : "Asset types"}</span>
+              <ChevronDown
+                className="size-4 shrink-0 text-muted-foreground transition-transform group-open:rotate-180"
+                aria-hidden
+              />
             </summary>
             <div className="mt-3 space-y-3">
               <p className="text-sm leading-relaxed text-muted-foreground">

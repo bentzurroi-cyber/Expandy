@@ -17,22 +17,35 @@ function trimRecord(row: Record<string, unknown>): Record<string, string> {
   return out;
 }
 
+type PapaCsvResult = {
+  data?: unknown[];
+  meta?: { fields?: unknown[] };
+  errors?: Array<{ message?: string }>;
+};
+
 export function parseCsvText(csvText: string): ParsedSheet {
   const warnings: string[] = [];
-  const parsed = Papa.parse<Record<string, unknown>>(csvText, {
+  const parsed = Papa.parse(csvText, {
     header: true,
     skipEmptyLines: "greedy",
-    transformHeader: (h: unknown) => String(h ?? "").trim(),
-  });
+    transformHeader: (h: string) => String(h ?? "").trim(),
+  }) as PapaCsvResult;
   if (parsed.errors?.length) {
     warnings.push(
-      ...parsed.errors.map((e) => String((e as { message?: unknown }).message ?? "CSV error")),
+      ...parsed.errors.map((e) => String(e.message ?? "CSV error")),
     );
   }
-  const fields = parsed.meta?.fields?.filter((f): f is string => typeof f === "string" && f.trim()) ?? [];
-  const rows = (parsed.data ?? [])
-    .map(trimRecord)
-    .filter((r) => Object.values(r).some((v) => v.trim() !== ""));
+  const rawFields = parsed.meta?.fields;
+  const fields =
+    Array.isArray(rawFields)
+      ? rawFields.filter((f): f is string => typeof f === "string" && f.trim() !== "")
+      : [];
+  const rawRows = Array.isArray(parsed.data) ? parsed.data : [];
+  const rows = rawRows
+    .map((r) => trimRecord(r as Record<string, unknown>))
+    .filter((r: Record<string, string>) =>
+      Object.values(r).some((v: string) => v.trim() !== ""),
+    );
   return { headers: fields, rows, parseWarnings: warnings };
 }
 

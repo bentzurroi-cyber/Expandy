@@ -96,10 +96,10 @@ export function AssetsView({ isActive = true }: { isActive?: boolean }) {
     typeof parsedAddBalance === "number" && Number.isFinite(parsedAddBalance)
       ? Math.round(parsedAddBalance * 100) / 100
       : null;
-  const addIlsPreview =
-    addCurrency !== "ILS" && addBalanceRounded != null
-      ? convertToILS(addBalanceRounded, addCurrency, rateDate)
-      : null;
+  const addIlsPreview = useMemo(() => {
+    if (addCurrency === "ILS" || addBalanceRounded == null) return null;
+    return convertToILS(addBalanceRounded, addCurrency, rateDate);
+  }, [addCurrency, addBalanceRounded, rateDate, addFxPreviewTick]);
 
   useEffect(() => {
     if (addCurrency === "ILS") return;

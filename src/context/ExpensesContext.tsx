@@ -45,11 +45,7 @@ import {
   removeExpandyAppDataKeys,
 } from "@/lib/expandy-storage";
 import { isValidHouseholdCode, normalizeHouseholdCode } from "@/lib/household";
-import {
-  isStandardUuid,
-  parseLegacyInstallmentCompositeId,
-  parseProjectedRecurringId,
-} from "@/lib/expenseIds";
+import { isStandardUuid, parseProjectedRecurringId } from "@/lib/expenseIds";
 import { capReceiptUrls, MAX_RECEIPT_IMAGES } from "@/lib/receiptConstants";
 import { uploadReceiptImagesParallel } from "@/lib/receiptUpload";
 import { toast } from "sonner";
@@ -696,18 +692,11 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
   }, [profile?.household_id]);
 
   useEffect(() => {
-    console.log(`Current Household ID: ${profile?.household_id ?? "-"}`);
-  }, [profile?.household_id]);
-
-  useEffect(() => {
     async function loadHouseholdExpenses() {
       if (authLoading || !session || !user?.id) {
         return;
       }
       if (!isValidHouseholdCode(householdId)) {
-        console.log("[Expenses] Skipping fetch until household_id is ready", {
-          householdId,
-        });
         return;
       }
       try {
@@ -718,18 +707,14 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
           )
           .eq("household_id", householdId)
           .order("date", { ascending: false });
-        console.log("Fetch Result:", data, "Fetch Error:", error);
-        if (error) {
-          console.error("SELECT ERROR:", error.message);
-          return;
-        }
+        if (error) return;
         if (!data) return;
         const mapped = (data as SupabaseExpenseRow[])
           .map(mapDbExpenseToApp)
           .filter(isValidExpenseShape);
         setExpenses(dedupeExpenseRows(mapped));
-      } catch (error) {
-        console.error("SELECT ERROR:", error);
+      } catch {
+        /* ignore load failures; user can retry by navigating */
       }
     }
     void loadHouseholdExpenses();
@@ -758,11 +743,7 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
         .eq("household_id", householdId);
 
       if (existingExpenses === 0) {
-        const localExpenses = readStoredExpenses().filter((row) => {
-          if (isStandardUuid(row.id)) return true;
-          console.warn("[Expenses] Skipping local migration row with non-UUID id", row.id);
-          return false;
-        });
+        const localExpenses = readStoredExpenses().filter((row) => isStandardUuid(row.id));
         if (localExpenses.length) {
           await supabase.from("expenses").upsert(
             localExpenses.map((row) => ({
@@ -1029,7 +1010,6 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
   const addExpense = useCallback(async (rawInput: AddExpenseInput) => {
     const cloud = await waitForCloudContext();
     if (!cloud) {
-      console.error("Missing household_id. Cannot save data.");
       return { ok: false as const, error: "אין חיבור לחשבון. נסה שוב בעוד רגע." };
     }
 
@@ -1077,7 +1057,6 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
 
     for (const row of rows) {
       if (!isStandardUuid(row.id)) {
-        console.error("[Expenses] Refusing cloud write: expense id is not a UUID", row.id);
         return {
           ok: false as const,
           error: "שמירה נכשלה: מזהה תנועה לא תקין. נסה שוב.",
@@ -1135,13 +1114,11 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
     try {
       const { error } = await supabase.from("expenses").upsert(payload);
       if (error) {
-        console.error(error);
         showSupabaseInsertError(error);
         setExpenses((prev) => prev.filter((x) => !optimisticIds.has(x.id)));
         return { ok: false as const, error: `שמירה לענן נכשלה: ${error.message}` };
       }
     } catch (error) {
-      console.error(error);
       showSupabaseInsertError(error);
       setExpenses((prev) => prev.filter((x) => !optimisticIds.has(x.id)));
       return {
@@ -1570,7 +1547,6 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
       try {
         const cloud = await waitForCloudContext();
         if (!cloud) {
-          console.error("Missing household_id. Cannot save data.");
           return {
             ok: false as const,
             error: "אין חיבור לחשבון. נסה שוב בעוד רגע.",
@@ -1617,13 +1593,11 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
         try {
           const { error } = await supabase.from("expenses").insert(payload);
           if (error) {
-            console.error(error);
             showSupabaseInsertError(error);
             setExpenses((prev) => prev.filter((x) => !optimisticIds.has(x.id)));
             return { ok: false as const, error: error.message };
           }
         } catch (error) {
-          console.error(error);
           showSupabaseInsertError(error);
           setExpenses((prev) => prev.filter((x) => !optimisticIds.has(x.id)));
           return {
@@ -1633,7 +1607,6 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
         }
         return { ok: true as const, count: withIds.length };
       } catch (err) {
-        console.error("[Expenses] bulkImportIncomes crashed", err);
         return {
           ok: false as const,
           error:
@@ -1651,7 +1624,6 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
       try {
         const cloud = await waitForCloudContext();
         if (!cloud) {
-          console.error("Missing household_id. Cannot save data.");
           return {
             ok: false as const,
             error: "אין חיבור לחשבון. נסה שוב בעוד רגע.",
@@ -1698,13 +1670,11 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
         try {
           const { error } = await supabase.from("expenses").insert(payload);
           if (error) {
-            console.error(error);
             showSupabaseInsertError(error);
             setExpenses((prev) => prev.filter((x) => !optimisticIds.has(x.id)));
             return { ok: false as const, error: error.message };
           }
         } catch (error) {
-          console.error(error);
           showSupabaseInsertError(error);
           setExpenses((prev) => prev.filter((x) => !optimisticIds.has(x.id)));
           return {
@@ -1714,7 +1684,6 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
         }
         return { ok: true as const, count: withIds.length };
       } catch (err) {
-        console.error("[Expenses] bulkImportExpenses crashed", err);
         return {
           ok: false as const,
           error:
@@ -1812,12 +1781,6 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
       }
 
       if (!isStandardUuid(id)) {
-        if (parseLegacyInstallmentCompositeId(id)) {
-          console.warn(
-            "[Expenses] Skipping cloud update for legacy installment id; UI updated locally only",
-            id,
-          );
-        }
         setExpenses((prev) =>
           prev.map((e) => (e.id === id ? mergeExpensePatch(e, patch) : e)),
         );
@@ -1854,17 +1817,11 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
           if (!cloud || !isStandardUuid(projected.templateId)) return;
           const body = buildSupabaseExpenseUpdateBody(templatePatch);
           if (Object.keys(body).length === 0) return;
-          const { error } = await supabase
+          await supabase
             .from("expenses")
             .update(body)
             .eq("id", projected.templateId)
             .eq("household_id", cloud.householdId);
-          if (error) {
-            console.error("[Expenses] Cloud update failed", {
-              expenseId: projected.templateId,
-              error: error.message,
-            });
-          }
         })();
         return;
       }
@@ -1874,12 +1831,6 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
       );
 
       if (!isStandardUuid(id)) {
-        if (parseLegacyInstallmentCompositeId(id)) {
-          console.warn(
-            "[Expenses] Skipping cloud update for legacy installment id; UI updated locally only",
-            id,
-          );
-        }
         return;
       }
 
@@ -1888,14 +1839,11 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
         if (!cloud) return;
         const body = buildSupabaseExpenseUpdateBody(patch);
         if (Object.keys(body).length === 0) return;
-        const { error } = await supabase
+        await supabase
           .from("expenses")
           .update(body)
           .eq("id", id)
           .eq("household_id", cloud.householdId);
-        if (error) {
-          console.error("[Expenses] Cloud update failed", { expenseId: id, error: error.message });
-        }
       })();
     },
     [waitForCloudContext],
@@ -1914,12 +1862,6 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
     }
 
     if (!isStandardUuid(id)) {
-      if (parseLegacyInstallmentCompositeId(id)) {
-        console.warn(
-          "[Expenses] Removing legacy installment row locally only (id is not a UUID)",
-          id,
-        );
-      }
       setExpenses((prev) => prev.filter((e) => e.id !== id));
       return { ok: true as const };
     }
@@ -1928,15 +1870,13 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
     if (!cloud) {
       return { ok: false as const, error: "אין חיבור לחשבון. נסה שוב בעוד רגע." };
     }
-    const { data, error } = await supabase
+    const { error } = await supabase
       .from("expenses")
       .delete()
       .eq("id", id)
       .eq("household_id", cloud.householdId)
       .select("id");
-    console.log("[History] Delete response:", { data, error });
     if (error) {
-      console.error("[Expenses] Cloud delete failed", { expenseId: id, error: error.message });
       return { ok: false as const, error: `מחיקה מהענן נכשלה: ${error.message}` };
     }
     setExpenses((prev) => prev.filter((e) => e.id !== id));
