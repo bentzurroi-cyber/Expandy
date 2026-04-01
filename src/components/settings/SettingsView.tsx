@@ -151,6 +151,8 @@ export function SettingsView() {
     removeManagedCurrency,
     bulkImportIncomes,
     bulkImportExpenses,
+    addExpenseCategory,
+    addIncomeSource,
     clearAllUserData: clearExpensesData,
     updateExpenseCategory,
     deleteExpenseCategory,
@@ -206,6 +208,7 @@ export function SettingsView() {
   const importAssetsInputRef = useRef<HTMLInputElement | null>(null);
   const importIncomesInputRef = useRef<HTMLInputElement | null>(null);
   const importExpensesInputRef = useRef<HTMLInputElement | null>(null);
+  const [importLoading, setImportLoading] = useState(false);
   const [activeTab, setActiveTab] = useState<"general" | "finance" | "data">("general");
   const [monthlyBudgetDraft, setMonthlyBudgetDraft] = useState("");
   const [monthlyBudgetSaveState, setMonthlyBudgetSaveState] = useState<
@@ -548,6 +551,7 @@ export function SettingsView() {
 
   function onPickImportExpenses(file: File | null) {
     if (!file) return;
+    setImportLoading(true);
     void (async () => {
       try {
         const sheet = await parseImportFile(file);
@@ -573,6 +577,7 @@ export function SettingsView() {
       } catch {
         toast.error(t.importParseError);
       } finally {
+        setImportLoading(false);
         if (importExpensesInputRef.current) importExpensesInputRef.current.value = "";
       }
     })();
@@ -823,6 +828,7 @@ export function SettingsView() {
 
   async function onPickImportAssets(file: File | null) {
     if (!file) return;
+    setImportLoading(true);
     try {
       const sheet = await parseImportFile(file);
       const built = buildAssetImportRows(sheet, assetTypes);
@@ -842,12 +848,14 @@ export function SettingsView() {
     } catch {
       toast.error(t.importParseError);
     } finally {
+      setImportLoading(false);
       if (importAssetsInputRef.current) importAssetsInputRef.current.value = "";
     }
   }
 
   async function onPickImportIncomes(file: File | null) {
     if (!file) return;
+    setImportLoading(true);
     try {
       const sheet = await parseImportFile(file);
       const built = buildIncomeImportRows(
@@ -872,6 +880,7 @@ export function SettingsView() {
     } catch {
       toast.error(t.importParseError);
     } finally {
+      setImportLoading(false);
       if (importIncomesInputRef.current) importIncomesInputRef.current.value = "";
     }
   }
@@ -1111,6 +1120,7 @@ export function SettingsView() {
                 type="button"
                 variant="outline"
                 className="w-full"
+                disabled={importLoading}
                 onClick={() => importExpensesInputRef.current?.click()}
               >
                 {lang === "he" ? "ייבוא הוצאות" : "Import expenses"}
@@ -1142,6 +1152,7 @@ export function SettingsView() {
                 type="button"
                 variant="outline"
                 className="w-full"
+                disabled={importLoading}
                 onClick={() => importIncomesInputRef.current?.click()}
               >
                 {t.importIncomes}
@@ -1173,6 +1184,7 @@ export function SettingsView() {
                 type="button"
                 variant="outline"
                 className="w-full"
+                disabled={importLoading}
                 onClick={() => importAssetsInputRef.current?.click()}
               >
                 {t.importAssets}
@@ -1857,6 +1869,13 @@ export function SettingsView() {
               </Dialog>
             </div>
           </details>
+          {importLoading ? (
+            <p className="text-xs leading-relaxed text-muted-foreground">
+              {lang === "he"
+                ? "טוען ומנתח את הקובץ... בקבצים גדולים זה יכול לקחת קצת זמן."
+                : "Loading and parsing file... Large files can take a bit longer."}
+            </p>
+          ) : null}
         </CardContent>
       </Card>
       ) : null}
@@ -2329,6 +2348,7 @@ export function SettingsView() {
           incomeSources={incomeSources}
           destinationAccounts={destinationAccounts}
           currencyToCode={currencyToCode}
+          onCreateCategory={async (name: string) => addIncomeSource(name)}
           initialRows={importReview.rows}
           labels={{
             title: t.importReviewTitleIncomes,
@@ -2381,6 +2401,7 @@ export function SettingsView() {
           expenseCategories={expenseCategories}
           paymentMethods={paymentMethods}
           currencyToCode={currencyToCode}
+          onCreateCategory={async (name: string) => addExpenseCategory(name)}
           initialRows={importReview.rows}
           labels={{
             title: lang === "he" ? "סקירת ייבוא — הוצאות" : "Review import — expenses",

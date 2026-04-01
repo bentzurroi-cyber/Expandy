@@ -68,6 +68,7 @@ type Props =
       incomeSources: Category[];
       destinationAccounts: PaymentMethod[];
       currencyToCode: (raw: string) => string;
+      onCreateCategory?: (name: string) => Promise<string | null> | string | null;
       initialRows: IncomeImportRow[];
       onConfirm: (rows: IncomeImportRow[]) => Promise<{ ok: true } | { ok: false; error: string }>;
     })
@@ -76,6 +77,7 @@ type Props =
       expenseCategories: Category[];
       paymentMethods: PaymentMethod[];
       currencyToCode: (raw: string) => string;
+      onCreateCategory?: (name: string) => Promise<string | null> | string | null;
       initialRows: IncomeImportRow[];
       onConfirm: (rows: IncomeImportRow[]) => Promise<{ ok: true } | { ok: false; error: string }>;
     });
@@ -181,6 +183,32 @@ export function ImportReviewModal(props: Props) {
     [props],
   );
 
+  const bulkApplyCategoryLabel = useCallback(
+    (rawLabel: string, categoryId: string) => {
+      if (props.mode !== "incomes" && props.mode !== "expenses") return;
+      const normalized = rawLabel.trim().toLowerCase();
+      if (!normalized || !categoryId) return;
+      const categories = props.mode === "incomes" ? props.incomeSources : props.expenseCategories;
+      const destinations =
+        props.mode === "incomes" ? props.destinationAccounts : props.paymentMethods;
+      const picked = categories.find((c) => c.id === categoryId);
+      if (!picked) return;
+      setIncomeRows((prev) =>
+        prev.map((r) => {
+          const rowLabel = r.categoryLabel.trim().toLowerCase();
+          if (r.categoryId || rowLabel !== normalized) return r;
+          return revalidateIncomeRow(
+            { ...r, categoryId: picked.id, categoryLabel: picked.name },
+            categories,
+            destinations,
+            props.currencyToCode,
+          );
+        }),
+      );
+    },
+    [props],
+  );
+
   const editIncomeReadyRow = useCallback((clientId: string) => {
     setIncomeRows((prev) =>
       prev.map((r) =>
@@ -279,6 +307,8 @@ export function ImportReviewModal(props: Props) {
               destinationAccounts={props.mode === "incomes" ? props.destinationAccounts : props.paymentMethods}
               onPatch={patchIncome}
               onApplyRow={applyIncomeRow}
+              onBulkApplyCategoryLabel={bulkApplyCategoryLabel}
+              onCreateCategory={props.onCreateCategory}
               labels={labels}
               onEditRow={editIncomeReadyRow}
             />
@@ -475,6 +505,8 @@ function IncomesReviewBody({
   destinationAccounts,
   onPatch,
   onApplyRow,
+  onBulkApplyCategoryLabel,
+  onCreateCategory,
   onEditRow,
   labels,
 }: {
@@ -484,11 +516,145 @@ function IncomesReviewBody({
   destinationAccounts: PaymentMethod[];
   onPatch: (id: string, patch: Partial<IncomeImportRow>) => void;
   onApplyRow: (id: string) => void;
+  onBulkApplyCategoryLabel: (rawLabel: string, categoryId: string) => void;
+  onCreateCategory?: (name: string) => Promise<string | null> | string | null;
   onEditRow: (id: string) => void;
   labels: Base["labels"];
 }) {
+  const unresolvedCategoryGroups = useMemo(() => {
+    const byLabel = new Map<string, { label: string; count: number }>();
+    for (const row of attention) {
+      if (row.categoryId) continue;
+      const label = row.categoryLabel.trim();
+      if (!label) continue;
+      const key = label.toLowerCase();
+      const cur = byLabel.get(key);
+      if (cur) cur.count += 1;
+      else byLabel.set(key, { label, count: 1 });
+    }
+    return [...byLabel.values()].sort((a, b) => b.count - a.count || a.label.localeCompare(b.label, "he"));
+  }, [attention]);
+  const [bulkCategoryChoice, setBulkCategoryChoice] = useState<Record<string, string>>({});
+  const [creatingCategoryKey, setCreatingCategoryKey] = useState<string | null>(null);
+  const [creatingAll, setCreatingAll] = useState(false);
+  const isHebrew = /[\u0590-\u05FF]/.test(labels.title);
+
   return (
     <div className="space-y-8">
+      {unresolvedCategoryGroups.length > 0 ? (
+        <section className="space-y-3 rounded-xl border border-primary/30 bg-primary/5 p-4">
+          <h3 className="text-sm font-semibold">
+            {isHebrew ? "טיפול מרוכז בקטגוריות לא מזוהות" : "Bulk fix for unknown categories"}
+          </h3>
+          <p className="text-xs text-muted-foreground">
+            {isHebrew
+              ? "בחרו קטגוריה קיימת או צרו קטגוריה חדשה - והשיוך יחול אוטומטית על כל השורות עם אותו שם."
+              : "Choose an existing category or create a new one, and apply it to all rows with the same label."}
+          </p>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              disabled={!onCreateCategory || creatingAll}
+              onClick={async () => {
+                if (!onCreateCategory) return;
+                setCreatingAll(true);
+                try {
+                  for (const group of unresolvedCategoryGroups) {
+                    const existing = incomeSources.find(
+                      (c) => c.name.trim().toLowerCase() === group.label.trim().toLowerCase(),
+                    );
+                    if (existing?.id) {
+                      onBulkApplyCategoryLabel(group.label, existing.id);
+                      continue;
+                    }
+                    const createdId = await onCreateCategory(group.label);
+                    if (createdId) onBulkApplyCategoryLabel(group.label, createdId);
+                  }
+                } finally {
+                  setCreatingAll(false);
+                }
+              }}
+            >
+              {isHebrew ? "צור את כל הקטגוריות והחל" : "Create all categories and apply"}
+            </Button>
+            <span className="text-xs text-muted-foreground">
+              {isHebrew
+                ? "בכמות מידע גדולה הפעולה עשויה לקחת מעט זמן."
+                : "With large datasets this action may take a little longer."}
+            </span>
+          </div>
+          <ul className="space-y-2">
+            {unresolvedCategoryGroups.map((group) => {
+              const choice = bulkCategoryChoice[group.label.toLowerCase()] ?? "__none__";
+              return (
+                <li key={group.label.toLowerCase()} className="rounded-lg border border-border/60 bg-background/60 p-3">
+                  <div className="mb-2 flex items-center justify-between gap-2">
+                    <p className="text-sm font-medium">{group.label}</p>
+                    <span className="text-xs text-muted-foreground">
+                      {isHebrew ? `${group.count} שורות` : `${group.count} rows`}
+                    </span>
+                  </div>
+                  <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                    <Select
+                      value={choice}
+                      onValueChange={(v) =>
+                        setBulkCategoryChoice((prev) => ({
+                          ...prev,
+                          [group.label.toLowerCase()]: v,
+                        }))
+                      }
+                    >
+                      <SelectTrigger className="w-full sm:flex-1">
+                        <SelectValue placeholder={isHebrew ? "בחירת קטגוריה קיימת" : "Choose existing category"} />
+                      </SelectTrigger>
+                      <SelectContent position="popper" className="z-[200]">
+                        <SelectItem value="__none__" textValue="—">
+                          <SelectItemText>—</SelectItemText>
+                        </SelectItem>
+                        {incomeSources.map((c) => (
+                          <SelectItem key={`${group.label}-${c.id}`} value={c.id} textValue={c.name}>
+                            <SelectItemText>{c.name}</SelectItemText>
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      disabled={choice === "__none__"}
+                      onClick={() => onBulkApplyCategoryLabel(group.label, choice)}
+                    >
+                      {isHebrew ? "החל על כל השורות" : "Apply to all rows"}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      disabled={!onCreateCategory || creatingCategoryKey === group.label.toLowerCase()}
+                      onClick={async () => {
+                        if (!onCreateCategory) return;
+                        const key = group.label.toLowerCase();
+                        setCreatingCategoryKey(key);
+                        try {
+                          const createdId = await onCreateCategory(group.label);
+                          if (createdId) {
+                            onBulkApplyCategoryLabel(group.label, createdId);
+                          }
+                        } finally {
+                          setCreatingCategoryKey((cur) => (cur === key ? null : cur));
+                        }
+                      }}
+                    >
+                      {isHebrew ? "צור קטגוריה והחל" : "Create category & apply"}
+                    </Button>
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        </section>
+      ) : null}
+
       <section className="space-y-2">
         <h3 className="flex items-center gap-2 text-sm font-semibold text-emerald-600 dark:text-emerald-400">
           <CheckCircle2 className="size-4" aria-hidden />
