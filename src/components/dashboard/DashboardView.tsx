@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  AlertCircle,
   BarChart3,
   PieChart as PieChartIcon,
+  RefreshCw,
   TrendingDown,
   TrendingUp,
 } from "lucide-react";
@@ -43,7 +43,6 @@ import { useFxTick } from "@/context/FxContext";
 import { useExpenses } from "@/context/ExpensesContext";
 import { useI18n } from "@/context/I18nContext";
 import type { Expense } from "@/data/mock";
-import { overBudgetStripeStyle } from "@/lib/budgetStripe";
 import { convertToILS } from "@/lib/fx";
 import {
   localizedDestinationAccountName,
@@ -52,7 +51,12 @@ import {
   localizedPaymentMethodName,
 } from "@/lib/defaultEntityLabels";
 import { resolveTransactionCategory } from "@/lib/transactionCategoryDisplay";
-import { formatCurrencyCompact, formatDateDDMMYYYY, formatIls } from "@/lib/format";
+import {
+  formatCurrencyCompact,
+  formatDateDDMMYYYY,
+  formatIls,
+  isShekelCurrency,
+} from "@/lib/format";
 import {
   formatYearMonth,
   hebrewMonthYearLabel,
@@ -60,6 +64,7 @@ import {
   monthYearShort,
   type YearMonth,
 } from "@/lib/month";
+import { parseProjectedRecurringId } from "@/lib/expenseIds";
 import { cn } from "@/lib/utils";
 
 type ChartMode = "bars" | "pie";
@@ -115,7 +120,7 @@ export function DashboardView({
     paymentMethods,
     currencies,
   } = useExpenses();
-  const [chartMode, setChartMode] = useState<ChartMode>("bars");
+  const [chartMode, setChartMode] = useState<ChartMode>("pie");
   const ALL_TIME = "__all_time__" as const;
   const [timeframeMode, setTimeframeMode] = useState<"month" | "year" | "all">("month");
   const [selectedMonth, setSelectedMonth] = useState<YearMonth | typeof ALL_TIME>(() =>
@@ -218,9 +223,32 @@ export function DashboardView({
   }, [incomesOnly, expensesOnly, fxTick]);
   const normalizedNet = Math.abs(financeSummary.net) < 0.01 ? 0 : financeSummary.net;
   const netIsZero = Math.abs(normalizedNet) < 0.01;
-  const monthlyBudgetTotal = getMonthlyBudgetTotal(budgetMonthForView) * budgetScaleMonths;
-  const monthlyBudgetRemaining = Math.max(0, monthlyBudgetTotal - financeSummary.expense);
-  const monthlyBudgetOver = monthlyBudgetTotal > 0 && financeSummary.expense > monthlyBudgetTotal;
+  const storedMonthlyTotalCap =
+    getMonthlyBudgetTotal(budgetMonthForView) * budgetScaleMonths;
+  const summedCategoryBudgetCaps = useMemo(
+    () =>
+      expenseCategories.reduce(
+        (sum, cat) => sum + getBudget(cat.id, budgetMonthForView),
+        0,
+      ) * budgetScaleMonths,
+    [
+      expenseCategories,
+      getBudget,
+      budgetMonthForView,
+      budgetScaleMonths,
+      budgets,
+    ],
+  );
+  /** תקציב כולל מפורש מההגדרות, או — אם לא הוגדר — סכום תקציבי הקטגוריות */
+  const effectiveMonthlyBudgetTotal =
+    storedMonthlyTotalCap > 0 ? storedMonthlyTotalCap : summedCategoryBudgetCaps;
+  const monthlyBudgetRemaining = Math.max(
+    0,
+    effectiveMonthlyBudgetTotal - financeSummary.expense,
+  );
+  const monthlyBudgetOver =
+    effectiveMonthlyBudgetTotal > 0 &&
+    financeSummary.expense > effectiveMonthlyBudgetTotal;
 
   /** Same order as Entry / Settings: `rows` follows `expenseCategories` from context. */
   const categoryGridRowsVisible = useMemo(
@@ -283,6 +311,37 @@ export function DashboardView({
   const maxSpend = useMemo(
     () => rows.reduce((m, r) => Math.max(m, r.spent), 0),
     [rows],
+  );
+
+  const expenseBarChartData = useMemo(() => {
+    const positive = [...rows]
+      .filter((r) => r.spent > 0)
+      .sort((a, b) => b.spent - a.spent);
+    const maxBars = 14;
+    if (positive.length <= maxBars) {
+      return positive.map((r) => ({
+        name: r.name,
+        spent: r.spent,
+        fill: r.color,
+      }));
+    }
+    const top = positive.slice(0, maxBars);
+    const rest = positive.slice(maxBars);
+    const otherSum = rest.reduce((s, r) => s + r.spent, 0);
+    const otherLabel = lang === "he" ? "אחר" : "Other";
+    return [
+      ...top.map((r) => ({
+        name: r.name,
+        spent: r.spent,
+        fill: r.color,
+      })),
+      { name: otherLabel, spent: otherSum, fill: "#71717a" },
+    ];
+  }, [rows, lang]);
+
+  const expenseBarChartHeight = Math.min(
+    400,
+    Math.max(160, expenseBarChartData.length * 26 + 44),
   );
 
   const recentSorted = useMemo(() => {
@@ -404,7 +463,7 @@ export function DashboardView({
               "rounded-lg border px-3 py-2",
               monthlyBudgetOver
                 ? "border-red-500/35 bg-red-500/5"
-                : monthlyBudgetTotal > 0
+                : effectiveMonthlyBudgetTotal > 0
                   ? "border-emerald-500/30 bg-emerald-500/5"
                   : "border-border/70 bg-card/20",
             )}
@@ -416,7 +475,7 @@ export function DashboardView({
               <span
                 className={cn(
                   "size-2 rounded-full",
-                  monthlyBudgetTotal <= 0
+                  effectiveMonthlyBudgetTotal <= 0
                     ? "bg-muted-foreground/50"
                     : monthlyBudgetOver
                       ? "bg-red-500"
@@ -425,7 +484,7 @@ export function DashboardView({
                 aria-hidden
               />
             </div>
-            {monthlyBudgetTotal > 0 ? (
+            {effectiveMonthlyBudgetTotal > 0 ? (
               <>
                 <p
                   className={cn(
@@ -435,16 +494,16 @@ export function DashboardView({
                 >
                   {monthlyBudgetOver
                     ? lang === "he"
-                      ? `אין יתרה • חריגה ${formatIls(financeSummary.expense - monthlyBudgetTotal)}`
-                      : `No remaining • over ${formatIls(financeSummary.expense - monthlyBudgetTotal)}`
+                      ? `אין יתרה • חריגה ${formatIls(financeSummary.expense - effectiveMonthlyBudgetTotal)}`
+                      : `No remaining • over ${formatIls(financeSummary.expense - effectiveMonthlyBudgetTotal)}`
                     : lang === "he"
                       ? `נותר ${formatIls(monthlyBudgetRemaining)}`
                       : `${formatIls(monthlyBudgetRemaining)} remaining`}
                 </p>
                 <p className="text-xs tabular-nums leading-relaxed text-muted-foreground">
                   {lang === "he"
-                    ? `${formatIls(financeSummary.expense)} / ${formatIls(monthlyBudgetTotal)}`
-                    : `${formatIls(financeSummary.expense)} / ${formatIls(monthlyBudgetTotal)}`}
+                    ? `${formatIls(financeSummary.expense)} / ${formatIls(effectiveMonthlyBudgetTotal)}`
+                    : `${formatIls(financeSummary.expense)} / ${formatIls(effectiveMonthlyBudgetTotal)}`}
                 </p>
               </>
             ) : (
@@ -461,17 +520,6 @@ export function DashboardView({
             <div className="flex rounded-lg border border-border bg-muted/40 p-1">
               <Button
                 type="button"
-                variant={chartMode === "bars" ? "secondary" : "ghost"}
-                size="sm"
-                className="flex-1 gap-1.5"
-                onClick={() => setChartMode("bars")}
-                aria-pressed={chartMode === "bars"}
-              >
-                <BarChart3 className="size-4" />
-                {t.chartBars}
-              </Button>
-              <Button
-                type="button"
                 variant={chartMode === "pie" ? "secondary" : "ghost"}
                 size="sm"
                 className="flex-1 gap-1.5"
@@ -480,6 +528,17 @@ export function DashboardView({
               >
                 <PieChartIcon className="size-4" />
                 {t.chartPie}
+              </Button>
+              <Button
+                type="button"
+                variant={chartMode === "bars" ? "secondary" : "ghost"}
+                size="sm"
+                className="flex-1 gap-1.5"
+                onClick={() => setChartMode("bars")}
+                aria-pressed={chartMode === "bars"}
+              >
+                <BarChart3 className="size-4" />
+                {t.chartBars}
               </Button>
             </div>
           </div>
@@ -529,98 +588,86 @@ export function DashboardView({
                       </ResponsiveContainer>
                     </div>
                   </div>
-                  <ul
-                    className="flex flex-wrap justify-center gap-4 px-1"
+                  <PieBreakdownLegend
+                    items={pieData.map((d) => ({
+                      key: d.name,
+                      name: d.name,
+                      fill: d.fill,
+                      iconKey: d.iconKey,
+                    }))}
                     dir={dir}
-                    aria-label={t.chartPie}
-                  >
-                    {pieData.map((d) => (
-                      <li
-                        key={d.name}
-                        className="flex min-w-0 max-w-[min(100%,14rem)] items-center gap-3"
-                        dir={dir}
-                      >
-                        <CategoryGlyph iconKey={d.iconKey} className="size-3.5" />
-                        <span
-                          className="size-3 shrink-0 rounded-sm ring-1 ring-border/70"
-                          style={{ backgroundColor: d.fill }}
-                          aria-hidden
-                        />
-                        <span className="min-w-0 truncate text-base font-medium leading-relaxed">
-                          {d.name}
-                        </span>
-                      </li>
-                    ))}
-                  </ul>
+                    ariaLabel={t.chartPie}
+                    showMoreLabel={t.dashboardRecentShowMore}
+                    showLessLabel={t.dashboardRecentShowLess}
+                  />
                 </>
               )}
             </div>
           ) : (
-            <div className="space-y-2">
+            <div className="space-y-2" aria-label={t.chartBars}>
               <p className="text-sm font-medium uppercase tracking-wider leading-relaxed text-muted-foreground">
                 {t.byCategory}
               </p>
-              <ul className="grid grid-cols-2 gap-3">
-                {categoryGridRowsVisible.map((r) => (
-                  <li key={r.categoryId}>
-                    <div
-                      className={cn(
-                        "rounded-lg border border-border/50 bg-card/60 px-3 py-2.5",
-                        r.over && "border-red-500/50",
-                      )}
-                      dir={dir}
-                    >
-                      <div className="mx-auto flex w-full max-w-[18rem] flex-col items-center gap-2">
-                        <div className="flex w-full flex-col items-center gap-1">
-                          <div className="flex items-center justify-center gap-2 text-center">
-                            <CategoryGlyph
-                              iconKey={r.iconKey}
-                              className="size-3.5 shrink-0 opacity-80"
-                            />
-                            <span className="max-w-[14rem] truncate text-base font-medium leading-relaxed">
-                              {r.name}
-                            </span>
-                            {r.over ? (
-                              <AlertCircle className="size-3.5 shrink-0 text-red-500/70" />
-                            ) : null}
-                          </div>
-                          <span className="text-center text-base tabular-nums leading-relaxed text-muted-foreground">
-                            {formatIls(r.spent)}
-                          </span>
-                        </div>
-                        {/* Fixed slot: aligns row height with Monthly Budget cards */}
-                        <div
-                          className="flex h-5 w-full shrink-0 items-center justify-center gap-1 px-1"
-                          aria-hidden
-                        />
-                        <div className="h-1 w-full overflow-hidden rounded-full bg-secondary/90">
-                          <div
-                            className="h-full rounded-full transition-all"
-                            style={{
-                              width: `${r.budget > 0 ? (maxSpend ? (r.spent / maxSpend) * 100 : 0) : 0}%`,
-                              backgroundColor: r.budget > 0 ? r.color : "#9ca3af",
-                            }}
-                          />
-                        </div>
-                      </div>
-                    </div>
-                  </li>
-                ))}
-              </ul>
-
-              {rows.length > CATEGORY_GRID_INITIAL ? (
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  className="w-full text-sm leading-relaxed text-muted-foreground"
-                  onClick={toggleCategoryGridExpanded}
+              {expenseBarChartData.length === 0 ? (
+                <p className="py-8 text-center text-base leading-relaxed text-muted-foreground">
+                  {t.pieEmpty}
+                </p>
+              ) : (
+                <div
+                  className="w-full rounded-xl border border-border/60 bg-muted/30 p-2"
+                  dir="ltr"
                 >
-                  {showAllCategoryGrids
-                    ? t.dashboardRecentShowLess
-                    : t.dashboardRecentShowMore}
-                </Button>
-              ) : null}
+                  <div
+                    className="w-full"
+                    style={{ height: expenseBarChartHeight }}
+                  >
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart
+                        data={expenseBarChartData}
+                        layout="vertical"
+                        margin={{ top: 4, right: 12, left: 4, bottom: 4 }}
+                      >
+                        <XAxis
+                          type="number"
+                          tick={{ fontSize: 11 }}
+                          tickFormatter={(v) =>
+                            formatIls(typeof v === "number" ? v : Number(v))
+                          }
+                        />
+                        <YAxis
+                          type="category"
+                          dataKey="name"
+                          width={108}
+                          reversed
+                          tick={{ fontSize: 11 }}
+                          interval={0}
+                          tickFormatter={(v) => {
+                            const s = String(v);
+                            return s.length > 16 ? `${s.slice(0, 14)}…` : s;
+                          }}
+                        />
+                        <Tooltip
+                          cursor={{ fill: "hsl(var(--muted) / 0.22)" }}
+                          content={(tooltipProps) => (
+                            <ExpenseBarsTooltip
+                              active={tooltipProps.active}
+                              payload={tooltipProps.payload}
+                              label={tooltipProps.label}
+                              dir={dir}
+                              spentLabel={t.spent}
+                            />
+                          )}
+                        />
+                        <Bar dataKey="spent" radius={[0, 5, 5, 0]} maxBarSize={18}>
+                          {expenseBarChartData.map((e) => (
+                            <Cell key={e.name} fill={e.fill} />
+                          ))}
+                        </Bar>
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
@@ -628,20 +675,34 @@ export function DashboardView({
             <p className="text-sm font-medium uppercase tracking-wider leading-relaxed text-muted-foreground">
               {t.budgetSection}
             </p>
-            <ul className="grid grid-cols-2 gap-3" aria-live="polite">
+            <ul
+              className="grid grid-cols-2 gap-3 items-stretch"
+              aria-live="polite"
+            >
               {categoryGridRowsVisible.map((r) => {
                 const fillWidth =
                   r.budget > 0 ? Math.min(100, (r.spent / r.budget) * 100) : 0;
                 const overfill = r.over ? 100 : fillWidth;
                 const remaining = Math.max(0, r.budget - r.spent);
+                const noBudgetBarPct =
+                  r.budget <= 0 && maxSpend > 0 && r.spent > 0
+                    ? Math.max(5, Math.min(100, (r.spent / maxSpend) * 100))
+                    : 0;
+                const barWidthPct = r.budget > 0 ? overfill : noBudgetBarPct;
+                const overBy = r.over
+                  ? Math.max(0, r.spent - r.budget)
+                  : 0;
                 return (
-                  <li key={`budget-${r.categoryId}`}>
+                  <li
+                    key={`budget-${r.categoryId}`}
+                    className="flex min-h-0 min-w-0"
+                  >
                     <button
                       type="button"
                       className={cn(
-                        "w-full rounded-lg border border-border/50 bg-card/60 px-3 py-2.5 transition-colors",
+                        "flex w-full flex-col gap-1.5 rounded-lg border border-border/50 bg-card/60 px-2.5 py-2 text-center transition-colors",
                         "hover:bg-accent/25 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                        r.over && "border-red-500/50",
+                        r.over && "border-red-500/35",
                       )}
                       dir={dir}
                       onClick={() =>
@@ -653,52 +714,70 @@ export function DashboardView({
                         )
                       }
                     >
-                      <div className="mx-auto flex w-full max-w-[18rem] flex-col items-center gap-2">
-                        <div className="flex w-full flex-col items-center gap-1">
-                          <div className="flex items-center justify-center gap-2 text-center">
-                            <CategoryGlyph
-                              iconKey={r.iconKey}
-                              className="size-3.5 shrink-0 opacity-80"
-                            />
-                            <span className="max-w-[14rem] truncate text-base font-medium leading-relaxed">
-                              {r.name}
-                            </span>
-                          </div>
-                          <p className="text-center text-base tabular-nums leading-relaxed text-muted-foreground">
-                            {r.budget > 0 ? (
-                              <>
-                                {t.remaining} {formatIls(remaining)}
-                              </>
-                            ) : (
-                              t.noBudgetSet
-                            )}
+                      <div className="flex shrink-0 items-center justify-center gap-1.5">
+                        <CategoryGlyph
+                          iconKey={r.iconKey}
+                          className="size-3.5 shrink-0 opacity-80"
+                        />
+                        <span className="min-w-0 truncate text-sm font-medium leading-snug">
+                          {r.name}
+                        </span>
+                      </div>
+                      <div className="flex flex-col justify-center gap-0.5">
+                        {r.budget > 0 ? (
+                          <>
+                            <p className="text-base font-semibold tabular-nums leading-tight text-foreground">
+                              {formatIls(r.spent)}
+                            </p>
+                            <p className="text-xs tabular-nums leading-relaxed text-muted-foreground">
+                              {t.remaining} {formatIls(remaining)}
+                              <span className="text-muted-foreground/80">
+                                {" "}
+                                · {t.budget} {formatIls(r.budget)}
+                              </span>
+                            </p>
+                            {r.over ? (
+                              <p className="text-[0.7rem] font-medium leading-snug text-red-500">
+                                {t.budgetOverBy.replace(
+                                  "{{amount}}",
+                                  formatIls(overBy),
+                                )}
+                              </p>
+                            ) : null}
+                          </>
+                        ) : r.spent > 0 ? (
+                          <>
+                            <p className="text-base font-semibold tabular-nums leading-tight text-foreground">
+                              {formatIls(r.spent)}
+                            </p>
+                            <p className="text-[0.7rem] leading-relaxed text-muted-foreground">
+                              {t.noCategoryBudgetHint}
+                            </p>
+                            <p className="text-[0.65rem] leading-relaxed text-muted-foreground/70">
+                              {t.spendShareOfTopCategory}
+                            </p>
+                          </>
+                        ) : (
+                          <p className="text-xs leading-relaxed text-muted-foreground">
+                            {t.noCategoryBudgetHint}
                           </p>
-                        </div>
-                        <div className="flex h-5 w-full shrink-0 items-center justify-center gap-1 px-1 text-base font-medium leading-snug text-destructive">
-                          {r.over ? (
-                            <>
-                              <AlertCircle className="size-3.5 shrink-0" aria-hidden />
-                              <span className="line-clamp-1">{t.overBudget}</span>
-                            </>
-                          ) : null}
-                        </div>
+                        )}
+                      </div>
+                      <div
+                        className="mt-0.5 h-1.5 w-full shrink-0 overflow-hidden rounded-full bg-secondary/90"
+                        role="presentation"
+                      >
                         <div
-                          className={cn(
-                            "h-1 w-full overflow-hidden rounded-full bg-secondary/90",
-                            r.over && "ring-1 ring-red-500/25",
-                          )}
-                          role="presentation"
-                        >
-                          <div
-                            className="h-full rounded-full transition-all"
-                            style={{
-                              width: `${r.budget > 0 ? overfill : 0}%`,
-                              ...(r.over
-                                ? overBudgetStripeStyle(r.color)
-                                : { backgroundColor: r.budget > 0 ? r.color : "#9ca3af" }),
-                            }}
-                          />
-                        </div>
+                          className="h-full rounded-full transition-[width] duration-700 ease-out"
+                          style={{
+                            width: `${barWidthPct}%`,
+                            backgroundColor: r.over
+                              ? "rgb(220 38 38)"
+                              : r.budget > 0 || r.spent > 0
+                                ? r.color
+                                : "rgb(156 163 175 / 0.45)",
+                          }}
+                        />
                       </div>
                     </button>
                   </li>
@@ -768,29 +847,18 @@ export function DashboardView({
                       </ResponsiveContainer>
                     </div>
                   </div>
-                  <ul
-                    className="flex flex-wrap justify-center gap-4 px-1"
+                  <PieBreakdownLegend
+                    items={incomeBreakdown.map((d) => ({
+                      key: d.categoryId,
+                      name: d.name,
+                      fill: d.fill,
+                      iconKey: d.iconKey,
+                    }))}
                     dir={dir}
-                    aria-label={t.chartPie}
-                  >
-                    {incomeBreakdown.map((d) => (
-                      <li
-                        key={d.name}
-                        className="flex min-w-0 max-w-[min(100%,14rem)] items-center gap-3"
-                        dir={dir}
-                      >
-                        <CategoryGlyph iconKey={d.iconKey} className="size-3.5" />
-                        <span
-                          className="size-3 shrink-0 rounded-sm ring-1 ring-border/70"
-                          style={{ backgroundColor: d.fill }}
-                          aria-hidden
-                        />
-                        <span className="min-w-0 truncate text-base font-medium leading-relaxed">
-                          {d.name}
-                        </span>
-                      </li>
-                    ))}
-                  </ul>
+                    ariaLabel={t.incomeBreakdown}
+                    showMoreLabel={t.dashboardRecentShowMore}
+                    showLessLabel={t.dashboardRecentShowLess}
+                  />
                 </>
               )}
             </div>
@@ -839,13 +907,21 @@ export function DashboardView({
                             {dateLabel}
                           </span>
                         </div>
-                        {e.installments > 1 ? (
+                        {e.installments > 1 && parseProjectedRecurringId(e.id) == null ? (
                           <p className="text-sm leading-relaxed text-muted-foreground">
                             {t.installmentLabel} {e.installmentIndex} {t.ofLabel} {e.installments}
                           </p>
                         ) : null}
+                        {e.recurringMonthly === true || parseProjectedRecurringId(e.id) != null ? (
+                          <p className="flex items-center gap-1 text-sm leading-relaxed text-muted-foreground">
+                            <RefreshCw className="size-3 shrink-0" aria-hidden />
+                            <span>
+                              {e.type === "income" ? t.recurringIncome : t.recurringExpense}
+                            </span>
+                          </p>
+                        ) : null}
                         <div className="flex flex-wrap items-center gap-2 text-base leading-relaxed text-muted-foreground">
-                          {e.currency !== "ILS" ? (
+                          {!isShekelCurrency(e.currency, currencies) ? (
                             <span className="rounded-md border border-border/70 bg-background px-1.5 py-0.5">
                               {formatCurrencyCompact(e.amount, e.currency, currencies)}
                             </span>
@@ -1001,6 +1077,80 @@ export function DashboardView({
   );
 }
 
+const PIE_LEGEND_INITIAL = 8;
+
+type PieBreakdownLegendItem = {
+  key: string;
+  name: string;
+  fill: string;
+  iconKey: string;
+};
+
+function PieBreakdownLegend({
+  items,
+  dir,
+  ariaLabel,
+  showMoreLabel,
+  showLessLabel,
+}: {
+  items: PieBreakdownLegendItem[];
+  dir: "rtl" | "ltr";
+  ariaLabel: string;
+  showMoreLabel: string;
+  showLessLabel: string;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const needsToggle = items.length > PIE_LEGEND_INITIAL;
+  const visible =
+    expanded || !needsToggle
+      ? items
+      : items.slice(0, PIE_LEGEND_INITIAL);
+  return (
+    <div className="space-y-2 px-1" dir={dir}>
+      <ul
+        className="mx-auto grid w-full max-w-lg grid-cols-3 gap-2"
+        aria-label={ariaLabel}
+      >
+        {visible.map((d) => (
+          <li
+            key={d.key}
+            className="rounded-lg border border-border/50 bg-muted/20 px-3 py-2"
+          >
+            <div
+              className="grid w-full grid-cols-[1.25rem_0.625rem_minmax(0,1fr)] items-center gap-2.5"
+              dir={dir}
+            >
+              <CategoryGlyph
+                iconKey={d.iconKey}
+                className="size-3.5 shrink-0 justify-self-center text-muted-foreground"
+              />
+              <span
+                className="size-2.5 shrink-0 rounded-full ring-1 ring-border/60"
+                style={{ backgroundColor: d.fill }}
+                aria-hidden
+              />
+              <span className="min-w-0 truncate text-sm font-medium leading-snug">
+                {d.name}
+              </span>
+            </div>
+          </li>
+        ))}
+      </ul>
+      {needsToggle ? (
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="w-full text-sm leading-relaxed text-muted-foreground"
+          onClick={() => setExpanded((v) => !v)}
+        >
+          {expanded ? showLessLabel : showMoreLabel}
+        </Button>
+      ) : null}
+    </div>
+  );
+}
+
 function TrendBarChartLegend({
   payload,
   dir,
@@ -1043,6 +1193,48 @@ function TrendBarChartLegend({
           </div>
         );
       })}
+    </div>
+  );
+}
+
+function ExpenseBarsTooltip({
+  active,
+  payload,
+  label,
+  dir,
+  spentLabel,
+}: {
+  active?: boolean;
+  payload?: ReadonlyArray<{ value?: unknown; name?: unknown }>;
+  label?: unknown;
+  dir: "rtl" | "ltr";
+  spentLabel: string;
+}) {
+  if (!active || !payload?.length) return null;
+  const v = Number(payload[0]?.value ?? 0);
+  const name =
+    label != null && String(label).length > 0
+      ? String(label)
+      : payload[0]?.name != null
+        ? String(payload[0].name)
+        : "";
+  return (
+    <div
+      className="pointer-events-none z-50 max-w-[16rem] rounded-lg border border-border bg-popover px-3 py-2.5 text-popover-foreground shadow-md"
+      dir={dir}
+    >
+      {name ? (
+        <p className="text-sm font-semibold leading-snug text-foreground">{name}</p>
+      ) : null}
+      <p
+        className={cn(
+          "tabular-nums text-sm leading-relaxed text-foreground",
+          name ? "mt-1" : "",
+        )}
+      >
+        <span className="text-muted-foreground">{spentLabel}: </span>
+        {formatIls(v)}
+      </p>
     </div>
   );
 }

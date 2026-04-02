@@ -606,21 +606,23 @@ export function AssetsProvider({ children }: { children: ReactNode }) {
         }
         const ctx = persistCtx;
         const typeById = new Map(assetTypes.map((t) => [t.id, t] as const));
-        const typeRows = [...new Set(rows.map((r) => r.type.trim()).filter(Boolean))].map((typeId) => {
-          const local = typeById.get(typeId);
-          return {
-            ...(isUuidLike(typeId) ? { id: typeId } : {}),
-            user_id: ctx.userId,
-            type: "asset" as const,
-            name: local?.name ?? typeId,
-            color: local?.color ?? "#94a3b8",
-            icon: "tag",
-          };
-        });
+        const typeRows = [...new Set(rows.map((r) => r.type.trim()).filter(Boolean))]
+          .filter((typeId) => isUuidLike(typeId))
+          .map((typeId) => {
+            const local = typeById.get(typeId);
+            return {
+              id: typeId,
+              household_id: ctx.householdId,
+              type: "asset" as const,
+              name: local?.name ?? typeId,
+              color: local?.color ?? "#94a3b8",
+              icon: "tag",
+            };
+          });
         if (typeRows.length) {
           const { error: typeUpsertError } = await supabase
             .from("categories")
-            .upsert(typeRows, { onConflict: "user_id,name,type" });
+            .upsert(typeRows, { onConflict: "id" });
           if (typeUpsertError) {
             return { ok: false as const, error: typeUpsertError.message };
           }

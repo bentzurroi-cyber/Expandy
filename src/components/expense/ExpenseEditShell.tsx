@@ -10,7 +10,6 @@ import {
   AlertDialogFooter,
   AlertDialogHeader,
   AlertDialogTitle,
-  AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
 import {
   Dialog,
@@ -26,9 +25,9 @@ import {
   SheetHeader,
   SheetTitle,
 } from "@/components/ui/sheet";
-import { useExpenses } from "@/context/ExpensesContext";
+import { useExpenses, type RemoveExpenseOptions } from "@/context/ExpensesContext";
 import { useI18n } from "@/context/I18nContext";
-import { isStandardUuid } from "@/lib/expenseIds";
+import { isStandardUuid, parseProjectedRecurringId } from "@/lib/expenseIds";
 import { MAX_RECEIPT_IMAGES, capReceiptUrls } from "@/lib/receiptConstants";
 import { deleteReceiptObjectsByPublicUrls, uploadReceiptImage } from "@/lib/receiptUpload";
 import {
@@ -99,6 +98,10 @@ export function ExpenseEditShell({
   );
   const [receiptSlots, setReceiptSlots] = useState<ReceiptSlot[]>([]);
   const [saving, setSaving] = useState(false);
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [deleteDialogKind, setDeleteDialogKind] = useState<
+    "simple" | "instance" | "template" | null
+  >(null);
   const receiptInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -274,13 +277,27 @@ export function ExpenseEditShell({
     }
   }
 
-  async function handleDelete() {
+  function openDeleteDialog() {
     if (!expense) return;
-    const res = await removeExpense(expense.id);
+    if (parseProjectedRecurringId(expense.id)) {
+      setDeleteDialogKind("instance");
+    } else if (expense.recurringMonthly === true && isStandardUuid(expense.id)) {
+      setDeleteDialogKind("template");
+    } else {
+      setDeleteDialogKind("simple");
+    }
+    setDeleteDialogOpen(true);
+  }
+
+  async function runDelete(options?: RemoveExpenseOptions) {
+    if (!expense) return;
+    const res = await removeExpense(expense.id, options);
     if (!res.ok) {
       setHint(res.error);
       return;
     }
+    setDeleteDialogOpen(false);
+    setDeleteDialogKind(null);
     onOpenChange(false);
   }
 
@@ -463,23 +480,110 @@ export function ExpenseEditShell({
           >
             {saving ? t.saveInProgress : t.saveChanges}
           </Button>
-          <AlertDialog>
-            <AlertDialogTrigger asChild>
-              <Button type="button" variant="destructive" className="w-full">
-                מחק
-              </Button>
-            </AlertDialogTrigger>
+          <Button
+            type="button"
+            variant="destructive"
+            className="w-full"
+            onClick={openDeleteDialog}
+          >
+            {t.deleteExpenseFromDrawer}
+          </Button>
+          <AlertDialog
+            open={deleteDialogOpen}
+            onOpenChange={(open) => {
+              setDeleteDialogOpen(open);
+              if (!open) setDeleteDialogKind(null);
+            }}
+          >
             <AlertDialogContent>
-              <AlertDialogHeader>
-                <AlertDialogTitle>האם אתה בטוח?</AlertDialogTitle>
-                <AlertDialogDescription>
-                  האם אתה בטוח שברצונך למחוק רשומה זו? פעולה זו אינה ניתנת לביטול.
-                </AlertDialogDescription>
-              </AlertDialogHeader>
-              <AlertDialogFooter>
-                <AlertDialogCancel>{t.cancel}</AlertDialogCancel>
-                <AlertDialogAction onClick={() => void handleDelete()}>מחק</AlertDialogAction>
-              </AlertDialogFooter>
+              {deleteDialogKind === "simple" ? (
+                <>
+                  <AlertDialogHeader>
+                    <AlertDialogTitle>{t.deleteTransactionConfirmTitle}</AlertDialogTitle>
+                    <AlertDialogDescription>
+                      {t.deleteTransactionConfirmDesc}
+                    </AlertDialogDescription>
+                  </AlertDialogHeader>
+                  <AlertDialogFooter>
+                    <AlertDialogCancel>{t.cancel}</AlertDialogCancel>
+                    <AlertDialogAction onClick={() => void runDelete()}>
+                      {t.deleteExpenseFromDrawer}
+                    </AlertDialogAction>
+                  </AlertDialogFooter>
+                </>
+              ) : null}
+              {deleteDialogKind === "instance" ? (
+                <>
+                  <AlertDialogHeader>
+                    <AlertDialogTitle>{t.recurringDeleteInstanceTitle}</AlertDialogTitle>
+                    <AlertDialogDescription>
+                      {t.recurringDeleteInstanceDesc}
+                    </AlertDialogDescription>
+                  </AlertDialogHeader>
+                  <AlertDialogFooter className="flex-col gap-2 sm:flex-row sm:justify-end">
+                    <AlertDialogCancel className="mt-0">{t.cancel}</AlertDialogCancel>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      className="w-full sm:w-auto"
+                      onClick={() =>
+                        void runDelete({
+                          mode: "single",
+                        })
+                      }
+                    >
+                      {t.recurringDeleteThisOccurrence}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="destructive"
+                      className="w-full sm:w-auto"
+                      onClick={() => void runDelete({ mode: "series" })}
+                    >
+                      {t.recurringDeleteWholeSeries}
+                    </Button>
+                  </AlertDialogFooter>
+                </>
+              ) : null}
+              {deleteDialogKind === "template" ? (
+                <>
+                  <AlertDialogHeader>
+                    <AlertDialogTitle>{t.recurringDeleteTemplateTitle}</AlertDialogTitle>
+                    <AlertDialogDescription>
+                      {t.recurringDeleteTemplateDesc}
+                    </AlertDialogDescription>
+                  </AlertDialogHeader>
+                  <AlertDialogFooter className="flex-col gap-2 sm:flex-row sm:justify-end">
+                    <AlertDialogCancel className="mt-0">{t.cancel}</AlertDialogCancel>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      className="w-full sm:w-auto"
+                      onClick={() =>
+                        void runDelete({
+                          mode: "demote",
+                          isRecurringTemplate: true,
+                        })
+                      }
+                    >
+                      {t.recurringDeleteDemoteToOneOff}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="destructive"
+                      className="w-full sm:w-auto"
+                      onClick={() =>
+                        void runDelete({
+                          mode: "series",
+                          isRecurringTemplate: true,
+                        })
+                      }
+                    >
+                      {t.recurringDeleteRemoveRowPermanently}
+                    </Button>
+                  </AlertDialogFooter>
+                </>
+              ) : null}
             </AlertDialogContent>
           </AlertDialog>
         </div>

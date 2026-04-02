@@ -156,6 +156,10 @@ export const en = {
   exportPeriodLabel: "Export period",
   exportAllTime: "All time",
   exportCsv: "Export Excel",
+  budgetSaveAsDefault: "Save as default budget",
+  budgetSaveAsDefaultHint:
+    "Stores this month’s totals (overall + every category) for months that have no saved row yet, after walking back through previous months.",
+  budgetSaveAsDefaultSuccess: "Default budget template saved.",
   settingsBudgetsSection: "Budgets by category",
   settingsBudgetsSectionDesc: "Set a monthly cap per category.",
   settingsBudgetLabel: "Monthly cap (₪)",
@@ -224,10 +228,27 @@ export const en = {
   recurringDeleteDesc: "Delete only this payment, or stop the recurring income entirely?",
   recurringDeleteThisPayment: "Delete only this payment",
   recurringStopAll: "Stop recurring income",
+
+  deleteTransactionConfirmTitle: "Delete transaction",
+  deleteTransactionConfirmDesc: "Delete this entry? This cannot be undone.",
+
+  recurringDeleteInstanceTitle: "Recurring occurrence",
+  recurringDeleteInstanceDesc:
+    "Skip only this month, or delete the entire recurring series (including the template) from the database?",
+  recurringDeleteThisOccurrence: "This month only",
+  recurringDeleteWholeSeries: "Delete entire series",
+
+  recurringDeleteTemplateTitle: "Recurring transaction",
+  recurringDeleteTemplateDesc:
+    "Turn this into a one-off (no future months), or delete the row completely?",
+  recurringDeleteDemoteToOneOff: "One-off only",
+  recurringDeleteRemoveRowPermanently: "Delete completely",
   decrementInstallments: "Decrease installments",
   incrementInstallments: "Increase installments",
 
   noBudgetSet: "No budget set",
+  noCategoryBudgetHint: "No per-category budget",
+  spendShareOfTopCategory: "Relative to top-spend category",
   percentOfBudget: "of budget",
   pieTooltipOfTotal: "of total",
 
@@ -278,6 +299,15 @@ export const en = {
   importSuccessIncomes: "Import complete — added {{count}} income rows.",
   importParseError: "Could not read the file. Try CSV or Excel format.",
 
+  budgetOverBy: "Over by {{amount}}",
+  assetNetWorthScopeLabel: "Total includes",
+  assetNetWorthMakeDefault: "Make default",
+  assetNetWorthDefaultSavedToast: "Saved as default.",
+  assetNetWorthAllTypes: "All asset types",
+  assetNetWorthExcluding: "Excluding",
+  assetNetWorthExcludeSaveError: "Could not save your total preference. Try again.",
+  assetNetWorthExcludeSavedLocally:
+    "Couldn't update in DB. Preference was saved locally.",
   assetBalanceEntryMonth: "Balance entry date",
   assetChartFilterTypes: "Include in chart",
   assetChartFilterAssets: "Specific assets",

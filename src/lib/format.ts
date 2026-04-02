@@ -38,3 +38,23 @@ export function formatCurrencyCompact(
   const locale = code === "ILS" ? "he-IL" : "en-US";
   return `${sym}${Math.round(amount).toLocaleString(locale)}`;
 }
+
+/** Shekel in any common stored form — hide redundant “original currency” line when this is true. */
+export function isShekelCurrency(
+  code: string | undefined | null,
+  currencies: CurrencyDef[],
+): boolean {
+  const raw = typeof code === "string" ? code.trim() : "";
+  if (!raw) return true;
+  const upper = raw.toUpperCase();
+  if (upper === "ILS" || upper === "NIS") return true;
+  if (raw === "₪" || raw === "שקל" || raw === 'ש"ח' || raw === "שח") return true;
+  const c = currencies.find((x) => x.code === raw || x.code.toUpperCase() === upper);
+  if (c) {
+    if (c.code.toUpperCase() === "ILS") return true;
+    if (c.symbol.trim() === "₪") return true;
+    const lh = c.labelHe.trim();
+    if (lh === "שקל" || lh.startsWith("שקל ")) return true;
+  }
+  return false;
+}

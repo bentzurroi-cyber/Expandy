@@ -119,7 +119,7 @@ export const he = {
 
   assetsTitle: "נכסים",
   assetsSubtitle: "מעקב יתרות לחשבונות ונכסים פיננסיים.",
-  totalNetWorth: "סך הכל נכסים",
+  totalNetWorth: "סך כל הנכסים",
   liquidAccounts: "חשבונות נזילים",
   portfolios: "תיקי השקעות",
   pensions: "פנסיה / השתלמות",
@@ -159,6 +159,10 @@ export const he = {
   exportPeriodLabel: "תקופת ייצוא",
   exportAllTime: "כל הזמן",
   exportCsv: "ייצוא Excel",
+  budgetSaveAsDefault: "שמירה כברירת מחדל",
+  budgetSaveAsDefaultHint:
+    "שומר את התקציב של החודש הנבחר (סכום כולל + כל הקטגוריות) לשימוש בחודשים שאין להם עדיין הגדרה, וגם אחרי שרשרת החודשים הקודמים.",
+  budgetSaveAsDefaultSuccess: "נשמרה ברירת מחדל לתקציב.",
   settingsBudgetsSection: "תקציבים לפי קטגוריה",
   settingsBudgetsSectionDesc: "הגדרת תקרה חודשית לכל קטגוריה.",
   settingsBudgetLabel: "תקרה חודשית (₪)",
@@ -212,6 +216,21 @@ export const he = {
   recurringDeleteDesc: "למחוק רק את התשלום הזה, או לעצור את ההכנסה הקבועה לגמרי?",
   recurringDeleteThisPayment: "מחק רק תשלום זה",
   recurringStopAll: "עצור הכנסה קבועה",
+
+  deleteTransactionConfirmTitle: "מחיקת תנועה",
+  deleteTransactionConfirmDesc: "למחוק רשומה זו? הפעולה אינה ניתנת לביטול.",
+
+  recurringDeleteInstanceTitle: "מחיקת מופע חוזר",
+  recurringDeleteInstanceDesc:
+    "לדלג רק על החודש הזה, או למחוק לחלוטין את כל סדרת התנועות החוזרות (כולל התבנית)?",
+  recurringDeleteThisOccurrence: "רק חודש זה",
+  recurringDeleteWholeSeries: "מחק את כל הסדרה",
+
+  recurringDeleteTemplateTitle: "תנועה חוזרת",
+  recurringDeleteTemplateDesc:
+    "להפוך את הרשומה לחד־פעמית (בלי המשך חודשי), או למחוק אותה לחלוטין מהמסד?",
+  recurringDeleteDemoteToOneOff: "חד־פעמית בלבד",
+  recurringDeleteRemoveRowPermanently: "מחק לחלוטין",
   decrementInstallments: "הפחתת תשלום",
   incrementInstallments: "הוספת תשלום",
 
@@ -231,6 +250,10 @@ export const he = {
   installAppIosOnlyIntro: "ב־iPhone או ב־iPad, הוסיפו את האפליקציה דרך Safari:",
 
   noBudgetSet: "לא הוגדר תקציב",
+  /** כשאין תקציב לקטגוריה — שורה משנית מתחת לסכום */
+  noCategoryBudgetHint: "ללא תקציב יעד לקטגוריה",
+  /** פס יחסי כשאין תקציב — ביחס לקטגוריה עם ההוצאה הגבוהה ביותר */
+  spendShareOfTopCategory: "יחסי לקטגוריה המובילה",
   percentOfBudget: "מהתקציב",
   pieTooltipOfTotal: "מהסך הכולל",
 
@@ -281,6 +304,15 @@ export const he = {
   importSuccessIncomes: "הייבוא הושלם — נוספו {{count}} רשומות הכנסה.",
   importParseError: "לא הצלחנו לקרוא את הקובץ. נסו פורמט CSV או Excel.",
 
+  budgetOverBy: "חריגה {{amount}}",
+  assetNetWorthScopeLabel: "חישוב סך הכול",
+  assetNetWorthMakeDefault: "קבע כברירת מחדל",
+  assetNetWorthDefaultSavedToast: "נשמר כברירת מחדל.",
+  assetNetWorthAllTypes: "כל סוגי הנכסים",
+  assetNetWorthExcluding: "ללא",
+  assetNetWorthExcludeSaveError: "לא ניתן לשמור את העדפת הסיכום. נסו שוב.",
+  assetNetWorthExcludeSavedLocally:
+    "לא הצלחנו לעדכן ב-DB. ההעדפה נשמרה מקומית.",
   assetBalanceEntryMonth: "תאריך לרישום היתרה",
   assetChartFilterTypes: "כלול בגרף",
   assetChartFilterAssets: "נכסים ספציפיים",

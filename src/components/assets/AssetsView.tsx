@@ -17,14 +17,16 @@ import {
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Switch } from "@/components/ui/switch";
 import { DatePickerField } from "@/components/expense/DatePickerField";
+import { useAuth } from "@/context/AuthContext";
 import { useAssets } from "@/context/AssetsContext";
 import { useFxTick } from "@/context/FxContext";
 import { useExpenses } from "@/context/ExpensesContext";
 import { useI18n } from "@/context/I18nContext";
+import { supabase } from "@/lib/supabase";
 import { DEFAULT_CURRENCY } from "@/data/mock";
 import { convertToILS, prefetchFxRate } from "@/lib/fx";
 import { localizedAssetTypeName } from "@/lib/defaultEntityLabels";
-import { formatCurrencyCompact, formatIls, formatIlsCompact } from "@/lib/format";
+import { formatCurrencyCompact, formatIls, formatIlsCompact, isShekelCurrency } from "@/lib/format";
 import { formatNumericInput, parseNumericInput } from "@/utils/formatters";
 import {
   formatYearMonth,
@@ -41,10 +43,89 @@ const ASSET_TYPE_ACCENTS: Record<string, string> = {
   pension: "#a855f7",
 };
 
+const ASSET_NET_EXCLUDE_STORAGE_KEY = "expandy-assets-net-exclude-type-v1";
+
+function readGuestAssetNetExclude(): string {
+  try {
+    return localStorage.getItem(ASSET_NET_EXCLUDE_STORAGE_KEY)?.trim() ?? "";
+  } catch {
+    return "";
+  }
+}
+
 export function AssetsView({ isActive = true }: { isActive?: boolean }) {
   const fxTick = useFxTick();
   const { t, dir, lang } = useI18n();
+  const { user, profile, refreshProfile } = useAuth();
   const { currencies } = useExpenses();
+  const [activeExcludeTypeId, setActiveExcludeTypeId] = useState(
+    readGuestAssetNetExclude,
+  );
+  const profileAssetExcludeTypeId = profile?.assets_total_exclude_type_id?.trim() ?? "";
+  const savedDefaultExcludeTypeId = user?.id
+    ? profileAssetExcludeTypeId
+    : readGuestAssetNetExclude();
+  const isDefaultSelection =
+    (activeExcludeTypeId || "") === (savedDefaultExcludeTypeId || "");
+
+  useEffect(() => {
+    if (!isActive) return;
+    if (user?.id) {
+      setActiveExcludeTypeId(profileAssetExcludeTypeId);
+    } else {
+      setActiveExcludeTypeId(readGuestAssetNetExclude());
+    }
+  }, [isActive, user?.id, profileAssetExcludeTypeId]);
+
+  const saveAssetsTotalDefault = useCallback(async () => {
+    const v = (activeExcludeTypeId || "").trim();
+    if (user?.id) {
+      const { error } = await supabase
+        .from("profiles")
+        .update({ assets_total_exclude_type_id: v })
+        .eq("id", user.id);
+      if (error) {
+        const errMsg = String(error?.message ?? "");
+        const errCode =
+          (error as unknown as { code?: string })?.code ?? "UNKNOWN";
+        console.error(
+          "[Assets] Failed to persist assets_total_exclude_type_id",
+          "message:",
+          errMsg,
+          "code:",
+          errCode,
+          "userId:",
+          user.id,
+        );
+        toast.info(t.assetNetWorthExcludeSavedLocally);
+        return;
+      }
+      await refreshProfile();
+      toast.success(
+        lang === "he"
+          ? "נשמר כברירת מחדל."
+          : "Saved as default.",
+      );
+      return;
+    }
+    try {
+      if (v) localStorage.setItem(ASSET_NET_EXCLUDE_STORAGE_KEY, v);
+      else localStorage.removeItem(ASSET_NET_EXCLUDE_STORAGE_KEY);
+    } catch {
+      /* ignore */
+    }
+    toast.success(
+      lang === "he"
+        ? "נשמר כברירת מחדל."
+        : "Saved as default.",
+    );
+  }, [
+    activeExcludeTypeId,
+    lang,
+    refreshProfile,
+    t.assetNetWorthExcludeSavedLocally,
+    user?.id,
+  ]);
   const {
     snapshots,
     currentMonth,
@@ -189,9 +270,11 @@ export function AssetsView({ isActive = true }: { isActive?: boolean }) {
     () =>
       (currentAssets ?? []).reduce((sum, a) => {
         if (!a || typeof a.balance !== "number" || !Number.isFinite(a.balance)) return sum;
+        const typ = typeof a.type === "string" ? a.type : "";
+        if (activeExcludeTypeId && typ === activeExcludeTypeId) return sum;
         return sum + convertToILS(a.balance, a.currency ?? "ILS", `${currentMonth}-01`);
       }, 0),
-    [currentAssets, currentMonth, fxTick],
+    [currentAssets, currentMonth, fxTick, activeExcludeTypeId],
   );
 
   const currentSorted = useMemo(
@@ -328,8 +411,60 @@ export function AssetsView({ isActive = true }: { isActive?: boolean }) {
               </SelectContent>
             </Select>
           </div>
-          <p className="text-sm text-muted-foreground">{t.totalNetWorth}</p>
-          <p className="mt-1 text-3xl font-semibold tabular-nums">{formatIls(total)}</p>
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+            <div className="min-w-0">
+              <p className="text-sm text-muted-foreground">{t.totalNetWorth}</p>
+              <p className="mt-1 text-3xl font-semibold tabular-nums">
+                {formatIls(total)}
+              </p>
+            </div>
+            <div className="w-full shrink-0 space-y-1.5 sm:max-w-[16rem]">
+              <Label
+                htmlFor="asset-net-scope"
+                className="text-xs text-muted-foreground"
+              >
+                {t.assetNetWorthScopeLabel}
+              </Label>
+              <Select
+                value={activeExcludeTypeId || "__all__"}
+                onValueChange={(v) => {
+                  setActiveExcludeTypeId(v === "__all__" ? "" : v);
+                }}
+              >
+                <SelectTrigger id="asset-net-scope" className="h-9 w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent position="popper">
+                  <SelectItem value="__all__" textValue={t.assetNetWorthAllTypes}>
+                    <SelectItemText>{t.assetNetWorthAllTypes}</SelectItemText>
+                  </SelectItem>
+                  {(assetTypes ?? [])
+                    .filter((typ) => typ?.id)
+                    .map((typ) => {
+                      const id = typ.id;
+                      const nm = typeof typ.name === "string" ? typ.name : id;
+                      const label = `${t.assetNetWorthExcluding} ${localizedAssetTypeName(id, nm, lang)}`;
+                      return (
+                        <SelectItem key={id} value={id} textValue={label}>
+                          <SelectItemText>{label}</SelectItemText>
+                        </SelectItem>
+                      );
+                    })}
+                </SelectContent>
+              </Select>
+              {!isDefaultSelection ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    void saveAssetsTotalDefault();
+                  }}
+                  className="text-start text-xs text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+                >
+                  {t.assetNetWorthMakeDefault}
+                </button>
+              ) : null}
+            </div>
+          </div>
         </CardContent>
       </Card>
 
@@ -504,7 +639,7 @@ export function AssetsView({ isActive = true }: { isActive?: boolean }) {
                     <p className="text-base font-semibold tabular-nums">
                       {formatIls(convertToILS(bal, a?.currency ?? "ILS", `${currentMonth}-01`))}
                     </p>
-                    {a?.currency && a.currency !== "ILS" ? (
+                    {a?.currency && !isShekelCurrency(a.currency, currencies) ? (
                       <p className="text-sm leading-relaxed tabular-nums text-muted-foreground">
                         {formatCurrencyCompact(bal, a.currency, currencies)}
                       </p>

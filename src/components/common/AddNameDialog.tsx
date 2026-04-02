@@ -55,6 +55,7 @@ export function AddNameDialog({
               id="add-name"
               value={name}
               onChange={(e) => setName(e.target.value)}
+              onKeyDown={(e) => e.stopPropagation()}
               placeholder={placeholder}
               autoFocus
               autoComplete="off"

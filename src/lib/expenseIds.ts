@@ -7,6 +7,10 @@ export function isStandardUuid(id: string): boolean {
 }
 
 /** Virtual id for a projected recurring instance: `rec|<templateUuid>|<YYYY-MM>`. */
+export function projectedRecurringId(templateId: string, ym: string): string {
+  return `rec|${templateId}|${ym}`;
+}
+
 export function parseProjectedRecurringId(
   id: string,
 ): { templateId: string; ym: `${number}-${number}` } | null {

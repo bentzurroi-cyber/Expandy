@@ -44,9 +44,13 @@ function clampCategoryDisplayLimit(value: unknown): number {
 }
 
 function normalizeProfileRow(row: ProfileRow): ProfileRow {
+  const raw = (row as unknown as Record<string, unknown>)
+    .assets_total_exclude_type_id;
+  const ex = typeof raw === "string" ? raw.trim() : "";
   return {
     ...row,
     category_display_limit: clampCategoryDisplayLimit(row.category_display_limit),
+    assets_total_exclude_type_id: ex,
   };
 }
 
@@ -208,6 +212,7 @@ function guestProfileFor(user: User): ProfileRow {
     default_payment_method_id: "",
     default_destination_account_id: "",
     category_display_limit: 8,
+    assets_total_exclude_type_id: "",
   };
 }
 
@@ -222,18 +227,47 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const fetchProfileByUserId = useCallback(async (userId: string) => {
     console.log("[Auth] Profile fetch started", { userId });
-    const { data, error } = await withTimeout(
+    const selectWithAssets =
+      "id, email, household_id, is_admin, default_payment_method_id, default_destination_account_id, category_display_limit, assets_total_exclude_type_id";
+    const selectWithoutAssets =
+      "id, email, household_id, is_admin, default_payment_method_id, default_destination_account_id, category_display_limit";
+
+    const initial = await withTimeout(
       async () =>
         await supabase
           .from("profiles")
-          .select(
-      "id, email, household_id, is_admin, default_payment_method_id, default_destination_account_id, category_display_limit",
-    )
+          .select(selectWithAssets)
           .eq("id", userId)
           .maybeSingle(),
       5000,
       "Profile fetch",
     );
+
+    // Backwards-compatibility: older DBs might not have the column yet.
+    // Supabase types can get "locked" to the first select column set, so widen here.
+    let data: unknown = initial.data;
+    let error: any = initial.error;
+
+    if (error) {
+      const msg = error.message?.toLowerCase?.() ?? String(error.message).toLowerCase();
+      const maybeMissingColumn =
+        msg.includes("assets_total_exclude_type_id") || msg.includes("does not exist");
+      if (maybeMissingColumn) {
+        const fallback = await withTimeout(
+          async () =>
+            await supabase
+              .from("profiles")
+              .select(selectWithoutAssets)
+              .eq("id", userId)
+              .maybeSingle(),
+          5000,
+          "Profile fetch (fallback)",
+        );
+        data = fallback.data;
+        error = fallback.error;
+      }
+    }
+
     if (error) {
       console.error("[Auth] Profile fetch failed", { userId, error: error.message });
       return null;

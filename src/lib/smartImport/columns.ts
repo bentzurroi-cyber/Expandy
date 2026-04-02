@@ -54,7 +54,10 @@ export function resolveAssetColumns(keys: string[]): {
   return { date, amount, name, type, currency };
 }
 
-export function resolveIncomeColumns(keys: string[]): {
+export function resolveIncomeColumns(
+  keys: string[],
+  kind: "income" | "expense",
+): {
   date: string | null;
   amount: string | null;
   currency: string | null;
@@ -74,15 +77,27 @@ export function resolveIncomeColumns(keys: string[]): {
     has("מקור הכנסה"),
     (n) => n.includes("income") && n.includes("source"),
   ]);
-  const destination = findColumn(keys, [
-    (n) => n.includes("יעד") || n.includes("destination"),
+  /** Income: deposit / destination account only — never "אמצעי תשלום" (expense payment). */
+  const incomeDestinationMatchers: ((n: string) => boolean)[] = [
+    (n) => n.includes("חשבון יעד"),
+    (n) => n.includes("destination") && !n.includes("category"),
+    (n) =>
+      (n.includes("יעד") || n.includes("הפקדה")) && !n.includes("תשלום"),
     (n) => n.includes("חשבון") && (n.includes("יעד") || n.includes("הפקדה")),
+    (n) => n.includes("deposit") && (n.includes("account") || n.includes("to")),
+  ];
+  /** Expense: payment method columns (and English equivalents). */
+  const expenseDestinationMatchers: ((n: string) => boolean)[] = [
     has("אמצעי"),
     has("אופן", "תשלום"),
     (n) => n.includes("payment") && (n.includes("type") || n.includes("mode")),
     (n) => n.includes("payment") && (n.includes("account") || n.includes("method")),
     has("שיטת"),
-  ]);
+  ];
+  const destination = findColumn(
+    keys,
+    kind === "income" ? incomeDestinationMatchers : expenseDestinationMatchers,
+  );
   const note = findColumn(keys, [
     has("הערות"),
     has("הערה"),

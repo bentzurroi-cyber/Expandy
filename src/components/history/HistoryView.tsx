@@ -21,7 +21,12 @@ import { useExpenses } from "@/context/ExpensesContext";
 import { useI18n } from "@/context/I18nContext";
 import type { Expense } from "@/data/mock";
 import { convertToILS } from "@/lib/fx";
-import { formatCurrencyCompact, formatDateDDMMYYYY, formatIls } from "@/lib/format";
+import {
+  formatCurrencyCompact,
+  formatDateDDMMYYYY,
+  formatIls,
+  isShekelCurrency,
+} from "@/lib/format";
 import { resolveTransactionCategory } from "@/lib/transactionCategoryDisplay";
 import {
   localizedDestinationAccountName,
@@ -34,6 +39,7 @@ import {
   type YearMonth,
 } from "@/lib/month";
 import { capReceiptUrls } from "@/lib/receiptConstants";
+import { parseProjectedRecurringId, projectedRecurringId } from "@/lib/expenseIds";
 import { cn } from "@/lib/utils";
 import {
   Dialog,
@@ -103,6 +109,7 @@ export function HistoryView({
     destinationAccounts,
     currencies,
     updateExpense,
+    recurringIncomeSkips,
   } = useExpenses();
   const ALL_TIME = "__all_time__" as const;
   const [selectedMonth, setSelectedMonth] = useState<YearMonth | typeof ALL_TIME>(() =>
@@ -187,27 +194,29 @@ export function HistoryView({
           (targetDate.getMonth() - viewDate.getMonth());
         if (monthsFromBase < 0) continue;
         if (monthsFromView > 12) continue; // cap projection horizon
-        const id = `${tmpl.id}-installment-${monthsFromBase + 1}`;
+        if (ym === baseYm) continue;
+        const skips = new Set(recurringIncomeSkips[tmpl.id] ?? []);
+        if (skips.has(ym)) continue;
+        const id = projectedRecurringId(tmpl.id, ym);
         if (ids.has(id)) continue;
         const srcDay = Number(tmpl.date.slice(8, 10)) || 1;
         const safeDay = clampDayForMonth(ty, tm, srcDay);
-        const tmplInst = safeHistoryInstallments(tmpl);
+        const noteTrim =
+          typeof tmpl.note === "string" ? tmpl.note.trim() : "";
         out.push({
           ...tmpl,
           id,
           date: `${ym}-${String(safeDay).padStart(2, "0")}`,
           recurringMonthly: false,
-          installments: Math.max(1, tmplInst.installments),
-          installmentIndex: Math.max(1, monthsFromBase + 1),
-          note:
-            (typeof tmpl.note === "string" ? tmpl.note.trim() : "") ||
-            `תשלום ${Math.max(1, monthsFromBase + 1)} מתוך ${Math.max(1, tmplInst.installments)}`,
+          installments: 1,
+          installmentIndex: 1,
+          note: noteTrim,
         });
         ids.add(id);
       }
     }
     return out;
-  }, [expenses, selectedMonth, ALL_TIME]);
+  }, [expenses, selectedMonth, ALL_TIME, recurringIncomeSkips]);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -511,12 +520,14 @@ export function HistoryView({
             const dateLabel = dateStr ? formatDateDDMMYYYY(dateStr) : "—";
             const verified = e.isVerified === true;
             const { installments: instCount, installmentIndex: instIdx } = safeHistoryInstallments(e);
+            const isProjectedRecurring = parseProjectedRecurringId(e.id) != null;
             const installmentText =
-              rowType === "expense" && instCount > 1
+              rowType === "expense" && instCount > 1 && !isProjectedRecurring
                 ? t.historyInstallmentText
                     .replace("{{index}}", String(instIdx))
                     .replace("{{total}}", String(instCount))
                 : null;
+            const recurringBadge = e.recurringMonthly === true || isProjectedRecurring;
             const receiptUrls = safeHistoryReceiptUrls(e);
             const currencyCode = typeof e.currency === "string" && e.currency.trim() ? e.currency : "ILS";
             const amountSafe =
@@ -584,10 +595,12 @@ export function HistoryView({
                         >
                           {dateLabel}
                         </span>
-                        {e.recurringMonthly || (e.type === "expense" && e.installments > 1) ? (
+                        {recurringBadge ? (
                           <span className="mt-1 inline-flex items-center gap-1 text-sm leading-relaxed text-muted-foreground">
-                            <RefreshCw className="size-3" />
-                            <span>Recurring</span>
+                            <RefreshCw className="size-3 shrink-0" aria-hidden />
+                            <span>
+                              {rowType === "income" ? t.recurringIncome : t.recurringExpense}
+                            </span>
                           </span>
                         ) : null}
                       </div>
@@ -603,7 +616,7 @@ export function HistoryView({
                         {rowType === "income" ? "+ " : "- "}
                         {formatIls(convertToILS(amountSafe, currencyCode, dateStr || "1970-01-01"))}
                       </span>
-                      {currencyCode !== "ILS" ? (
+                      {!isShekelCurrency(currencyCode, currencies) ? (
                         <span className="text-sm leading-relaxed tabular-nums text-muted-foreground">
                           {formatCurrencyCompact(amountSafe, currencyCode, currencies)}
                         </span>

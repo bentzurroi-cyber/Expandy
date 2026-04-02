@@ -43,4 +43,12 @@ export type ProfileRow = {
   default_destination_account_id: string;
   /** Number of quick categories shown in expense form (1-8). */
   category_display_limit: number;
+  /**
+   * Asset type id to omit from headline net worth (e.g. `pension`); empty = all types.
+   */
+  /**
+   * Optional for backwards compatibility (older DB schema might not have this column yet).
+   * Empty/missing = include all asset types.
+   */
+  assets_total_exclude_type_id?: string;
 };

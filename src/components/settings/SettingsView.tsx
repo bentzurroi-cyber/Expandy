@@ -1,5 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ChevronDown, Download, Lightbulb, Pencil, Trash2 } from "lucide-react";
+import {
+  Bookmark,
+  ChevronDown,
+  Download,
+  Lightbulb,
+  Pencil,
+  Trash2,
+} from "lucide-react";
 import { downloadExpensesCsv, type CsvLookup } from "@/lib/exportCsv";
 import { Button } from "@/components/ui/button";
 import {
@@ -23,7 +30,10 @@ import { CategoryGlyph } from "@/components/expense/FinanceGlyphs";
 import { ColorBadge } from "@/components/expense/ColorBadge";
 import { IconPicker } from "@/components/settings/IconPicker";
 import { useAssets } from "@/context/AssetsContext";
-import { useBudgets } from "@/context/BudgetContext";
+import {
+  BUDGET_MONTHLY_TOTAL_KEY,
+  useBudgets,
+} from "@/context/BudgetContext";
 import { useExpenses } from "@/context/ExpensesContext";
 import {
   AlertDialog,
@@ -137,6 +147,7 @@ export function SettingsView() {
     setBudget,
     getMonthlyBudgetTotal,
     setMonthlyBudgetTotal,
+    setDefaultBudgetTemplate,
     clearAllUserData: clearBudgetData,
   } = useBudgets();
   const {
@@ -471,6 +482,26 @@ export function SettingsView() {
     };
   }, [categoryBudgetGap]);
 
+  const saveBudgetAsDefault = useCallback(() => {
+    const snapshot: Record<string, number> = {
+      [BUDGET_MONTHLY_TOTAL_KEY]:
+        Math.round(getMonthlyBudgetTotal(budgetMonth) * 100) / 100,
+    };
+    for (const c of sorted) {
+      snapshot[c.id] =
+        Math.round(getBudget(c.id, budgetMonth) * 100) / 100;
+    }
+    setDefaultBudgetTemplate(snapshot);
+    toast.success(t.budgetSaveAsDefaultSuccess);
+  }, [
+    budgetMonth,
+    getBudget,
+    getMonthlyBudgetTotal,
+    setDefaultBudgetTemplate,
+    sorted,
+    t.budgetSaveAsDefaultSuccess,
+  ]);
+
   const exportMonthOptions = useMemo(() => {
     const cur = formatYearMonth(new Date());
     const from = collectYearMonthsFromExpenses(expenses.map((e) => e.date));
@@ -572,6 +603,7 @@ export function SettingsView() {
           expenseCategories,
           paymentMethods,
           currencyToCode,
+          "expense",
         );
         if (built.fatal) {
           toast.error(built.fatal);
@@ -875,6 +907,7 @@ export function SettingsView() {
         incomeSources,
         destinationAccounts,
         currencyToCode,
+        "income",
       );
       if (built.fatal) {
         toast.error(built.fatal);
@@ -1616,6 +1649,7 @@ export function SettingsView() {
                     onChange={(e) =>
                       updateExpenseCategory(c.id, { name: e.target.value })
                     }
+                    onKeyDown={(e) => e.stopPropagation()}
                   />
                 </div>
               </>
@@ -1726,6 +1760,7 @@ export function SettingsView() {
                     onChange={(e) =>
                       updateIncomeSource(c.id, { name: e.target.value })
                     }
+                    onKeyDown={(e) => e.stopPropagation()}
                   />
                 </div>
               </>
@@ -1894,26 +1929,50 @@ export function SettingsView() {
         </CardHeader>
         <CardContent className="p-5">
           <div className="mb-4 rounded-xl border border-border/60 bg-background/40 p-3">
-            <div className="mb-3 space-y-1">
-              <Label htmlFor="budget-month" className="text-sm font-medium">
-                {lang === "he" ? "חודש תקציב" : "Budget month"}
-              </Label>
-              <Select value={budgetMonth} onValueChange={(v) => setBudgetMonth(v as YearMonth)}>
-                <SelectTrigger id="budget-month" className="w-full sm:w-[14rem]">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent position="popper">
-                  {exportMonthOptions.map((ym) => (
-                    <SelectItem key={`budget-${ym}`} value={ym} textValue={hebrewMonthYearLabel(ym)}>
-                      <SelectItemText>{hebrewMonthYearLabel(ym)}</SelectItemText>
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+            <div className="mb-3 space-y-2">
+              <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-end">
+                <div className="min-w-0 flex-1 space-y-1">
+                  <Label htmlFor="budget-month" className="text-sm font-medium">
+                    {lang === "he" ? "חודש תקציב" : "Budget month"}
+                  </Label>
+                  <Select
+                    value={budgetMonth}
+                    onValueChange={(v) => setBudgetMonth(v as YearMonth)}
+                  >
+                    <SelectTrigger
+                      id="budget-month"
+                      className="w-full sm:w-[14rem]"
+                    >
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent position="popper">
+                      {exportMonthOptions.map((ym) => (
+                        <SelectItem
+                          key={`budget-${ym}`}
+                          value={ym}
+                          textValue={hebrewMonthYearLabel(ym)}
+                        >
+                          <SelectItemText>
+                            {hebrewMonthYearLabel(ym)}
+                          </SelectItemText>
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-10 w-full shrink-0 gap-1.5 sm:w-auto"
+                  onClick={saveBudgetAsDefault}
+                >
+                  <Bookmark className="size-4" aria-hidden />
+                  {t.budgetSaveAsDefault}
+                </Button>
+              </div>
               <p className="text-xs leading-relaxed text-muted-foreground">
-                {lang === "he"
-                  ? "ברירת מחדל לחודש חדש: ערכי החודש הקודם, עם אפשרות עריכה מלאה."
-                  : "Default for a new month: previous month's values, fully editable."}
+                {t.budgetSaveAsDefaultHint}
               </p>
             </div>
             <Label htmlFor="monthly-budget" className="text-sm font-medium">
@@ -2138,6 +2197,7 @@ export function SettingsView() {
           <AlertDialogFooter>
             <AlertDialogCancel>{t.cancel}</AlertDialogCancel>
             <AlertDialogAction
+              disabled={deleteHasTransactions && !moveToId}
               onClick={() => {
                 if (!deleteId) return;
                 if (deleteHasTransactions) {
@@ -2320,6 +2380,7 @@ export function SettingsView() {
           <AlertDialogFooter>
             <AlertDialogCancel>{t.cancel}</AlertDialogCancel>
             <AlertDialogAction
+              disabled={deleteIncomeHasTransactions && !moveToIncomeId}
               onClick={() => {
                 if (!deleteIncomeId) return;
                 if (deleteIncomeHasTransactions) {
@@ -2443,7 +2504,7 @@ export function SettingsView() {
                 if (categoriesToUpsert.length) {
                   const { error: categoriesError } = await supabase
                     .from("categories")
-                    .upsert(categoriesToUpsert, { onConflict: "id" });
+                    .upsert(categoriesToUpsert, { onConflict: "user_id,name,type" });
                   if (categoriesError) {
                     toast.error(categoriesError.message, { id: IMPORT_TOAST_ID.incomes });
                     return { ok: false, error: categoriesError.message };
@@ -2525,7 +2586,7 @@ export function SettingsView() {
                 if (categoriesToUpsert.length) {
                   const { error: categoriesError } = await supabase
                     .from("categories")
-                    .upsert(categoriesToUpsert, { onConflict: "id" });
+                    .upsert(categoriesToUpsert, { onConflict: "user_id,name,type" });
                   if (categoriesError) {
                     toast.error(categoriesError.message, { id: IMPORT_TOAST_ID.expenses });
                     return { ok: false, error: categoriesError.message };

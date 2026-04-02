@@ -124,9 +124,10 @@ export function buildIncomeImportRows(
   incomeSources: Category[],
   destinations: PaymentMethod[],
   currencyToCode: (raw: string) => string,
+  kind: "income" | "expense",
 ): { rows: IncomeImportRow[]; fatal: string | null } {
   const keys = sheet.headers.length ? sheet.headers : Object.keys(sheet.rows[0] ?? {});
-  const cols = resolveIncomeColumns(keys);
+  const cols = resolveIncomeColumns(keys, kind);
   const missing = missingIncomeColumns(cols);
   if (missing.length) {
     return { rows: [], fatal: `חסרות עמודות: ${missing.join(", ")}` };
