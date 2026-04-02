@@ -1108,7 +1108,7 @@ function PieBreakdownLegend({
   return (
     <div className="space-y-2 px-1" dir={dir}>
       <ul
-        className="mx-auto grid w-full max-w-lg grid-cols-3 gap-2"
+        className="mx-auto grid w-full max-w-lg grid-cols-2 gap-2"
         aria-label={ariaLabel}
       >
         {visible.map((d) => (
@@ -1129,7 +1129,7 @@ function PieBreakdownLegend({
                 style={{ backgroundColor: d.fill }}
                 aria-hidden
               />
-              <span className="min-w-0 truncate text-sm font-medium leading-snug">
+              <span className="min-w-0 break-words text-sm font-medium leading-snug">
                 {d.name}
               </span>
             </div>

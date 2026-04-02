@@ -247,6 +247,35 @@ export const he = {
     "שים לב: פעולה זו תמחק את הנתונים לכלל משתתפי משק הבית. לא ניתן לבטל.",
   resetDataHouseholdConfirmCta: "מחיקה לכל המשתתפים",
 
+  householdJoinConfirmTitle: "בקשת הצטרפות למשק בית",
+  householdJoinConfirmDesc:
+    "הבקשה תישלח לאישור של חבר קיים במשק. האם לייבא את ההוצאות וההכנסות מהמשק הנוכחי שלך לנתונים המשותפים אחרי האישור?",
+  householdJoinOptionFresh: "רק להצטרף (בלי לייבא נתונים)",
+  householdJoinOptionImport: "כן — לייבא את הנתונים שלי אחרי אישור",
+  householdJoinRequestSent: "הבקשה נשלחה. ממתינים לאישור מחבר במשק.",
+  householdJoinRequestDuplicate: "כבר יש בקשה ממתינה למשק הזה.",
+  householdJoinErrorGeneric: "לא ניתן לשלוח את הבקשה כרגע.",
+  householdJoinErrorAlreadyMember: "כבר משויכים למשק בית זה.",
+  householdJoinIncomingTitle: "בקשות הצטרפות ממתינות",
+  householdJoinIncomingEmpty: "אין בקשות ממתינות.",
+  householdJoinReviewCta: "סקירה ואישור",
+  householdJoinReviewTitle: "אישור הצטרפות",
+  householdJoinReviewEmail: "אימייל",
+  householdJoinReviewImportYes: "המבקש ביקש לייבא את הנתונים שלו למשק.",
+  householdJoinReviewImportNo: "המבקש לא מייבא נתונים — קטגוריותיו יוחלפו בשלך.",
+  householdJoinReviewMergeHint:
+    "במצב ייבוא: קטגוריות שלא קיימות אצלך יתווספו לרשימה שלך; הקטגוריות שלו נשארות אצלו לצורך ההוצאות שיובאו.",
+  householdJoinReviewReplaceHint:
+    "בלי ייבוא: נמחקות הקטגוריות השמורות שלו בענן ומועתקות אליו הקטגוריות שלך (כמו אצלך).",
+  householdJoinCategoryPreview: "קטגוריות שנשמרו בבקשה (לפני האישור)",
+  householdJoinApprove: "אשר הצטרפות",
+  householdJoinReject: "דחה",
+  householdJoinApprovedToast: "ההצטרפות אושרה.",
+  householdJoinRejectedToast: "הבקשה נדחתה.",
+  householdJoinApproveFailed: "האישור נכשל.",
+  householdJoinOutgoingPending: "ממתינים לאישור הצטרפות למשק {{code}}.",
+  householdJoinCancelRequest: "בטל בקשה",
+
   installAppIosOnlyIntro: "ב־iPhone או ב־iPad, הוסיפו את האפליקציה דרך Safari:",
 
   noBudgetSet: "לא הוגדר תקציב",

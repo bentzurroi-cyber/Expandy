@@ -209,6 +209,36 @@ export const en = {
     "Warning: this will delete data for all members of the shared household. This cannot be undone.",
   resetDataHouseholdConfirmCta: "Delete data for everyone",
 
+  householdJoinConfirmTitle: "Request to join household",
+  householdJoinConfirmDesc:
+    "Your request will be sent for approval by someone already in this home. After approval, should we import your expenses and income from your current household into the shared data?",
+  householdJoinOptionFresh: "Join only (do not import my data)",
+  householdJoinOptionImport: "Yes — import my data after approval",
+  householdJoinRequestSent: "Request sent. Waiting for a household member to approve.",
+  householdJoinRequestDuplicate: "You already have a pending request for this household.",
+  householdJoinErrorGeneric: "Could not send the request right now.",
+  householdJoinErrorAlreadyMember: "You are already in this household.",
+  householdJoinIncomingTitle: "Pending join requests",
+  householdJoinIncomingEmpty: "No pending requests.",
+  householdJoinReviewCta: "Review & decide",
+  householdJoinReviewTitle: "Approve join request",
+  householdJoinReviewEmail: "Email",
+  householdJoinReviewImportYes: "They asked to import their data into this household.",
+  householdJoinReviewImportNo:
+    "They are not importing data — their saved categories will be replaced with yours.",
+  householdJoinReviewMergeHint:
+    "With import: categories you do not already have are added to your list; they keep their own categories for imported transactions.",
+  householdJoinReviewReplaceHint:
+    "Without import: their cloud categories are removed and replaced with a copy of yours.",
+  householdJoinCategoryPreview: "Categories captured with the request",
+  householdJoinApprove: "Approve",
+  householdJoinReject: "Reject",
+  householdJoinApprovedToast: "Join approved.",
+  householdJoinRejectedToast: "Request rejected.",
+  householdJoinApproveFailed: "Approval failed.",
+  householdJoinOutgoingPending: "Waiting for approval to join household {{code}}.",
+  householdJoinCancelRequest: "Cancel request",
+
   installAppIosOnlyIntro: "On iPhone or iPad, add the app from Safari:",
 
   manageCategories: "Manage categories",

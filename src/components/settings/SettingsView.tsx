@@ -104,6 +104,30 @@ function isUuidLike(value: string): boolean {
   );
 }
 
+type HouseholdJoinRequestRow = {
+  id: string;
+  requester_id: string;
+  household_code: string;
+  import_previous_data: boolean;
+  requester_email: string | null;
+  category_preview: unknown;
+  created_at: string;
+};
+
+function parseJoinCategoryPreview(raw: unknown): { name: string; type: string }[] {
+  if (!Array.isArray(raw)) return [];
+  const out: { name: string; type: string }[] = [];
+  for (const x of raw) {
+    if (!x || typeof x !== "object") continue;
+    const o = x as Record<string, unknown>;
+    const name = typeof o.name === "string" ? o.name.trim() : "";
+    const type = typeof o.type === "string" ? o.type : "";
+    if (!name) continue;
+    out.push({ name, type });
+  }
+  return out;
+}
+
 async function countProfilesForHousehold(householdId: string): Promise<number> {
   const { count, error } = await supabase
     .from("profiles")
@@ -217,6 +241,13 @@ export function SettingsView() {
   const [displayHouseholdCode, setDisplayHouseholdCode] = useState("");
   const [joinConfirmOpen, setJoinConfirmOpen] = useState(false);
   const [pendingJoinCode, setPendingJoinCode] = useState("");
+  const [incomingJoinRequests, setIncomingJoinRequests] = useState<HouseholdJoinRequestRow[]>([]);
+  const [incomingJoinLoading, setIncomingJoinLoading] = useState(false);
+  const [reviewJoinRequest, setReviewJoinRequest] = useState<HouseholdJoinRequestRow | null>(null);
+  const [joinReviewActionLoading, setJoinReviewActionLoading] = useState(false);
+  const [outgoingJoinPending, setOutgoingJoinPending] = useState<
+    { id: string; household_code: string }[]
+  >([]);
   const [leaveConfirmOpen, setLeaveConfirmOpen] = useState(false);
   const [leaveDialogMemberCount, setLeaveDialogMemberCount] = useState<number | null>(null);
   const [resetDataDialogOpen, setResetDataDialogOpen] = useState(false);
@@ -341,6 +372,82 @@ export function SettingsView() {
     setHouseholdMembers(emails);
     setMembersLoading(false);
   }, [lang, profile?.household_id]);
+
+  const loadIncomingJoinRequests = useCallback(async () => {
+    const code = normalizeHouseholdCode(profile?.household_id ?? "");
+    if (!user?.id || !isValidHouseholdCode(code)) {
+      setIncomingJoinRequests([]);
+      return;
+    }
+    setIncomingJoinLoading(true);
+    const { data, error } = await supabase
+      .from("household_join_requests")
+      .select(
+        "id, requester_id, household_code, import_previous_data, requester_email, category_preview, created_at",
+      )
+      .eq("household_code", code)
+      .eq("status", "pending")
+      .order("created_at", { ascending: false });
+    if (error) {
+      console.error("[Settings] loadIncomingJoinRequests", error);
+      setIncomingJoinRequests([]);
+    } else {
+      setIncomingJoinRequests((data ?? []) as HouseholdJoinRequestRow[]);
+    }
+    setIncomingJoinLoading(false);
+  }, [profile?.household_id, user?.id]);
+
+  const loadOutgoingJoinPending = useCallback(async () => {
+    if (!user?.id) {
+      setOutgoingJoinPending([]);
+      return;
+    }
+    const { data, error } = await supabase
+      .from("household_join_requests")
+      .select("id, household_code")
+      .eq("requester_id", user.id)
+      .eq("status", "pending");
+    if (error) {
+      console.error("[Settings] loadOutgoingJoinPending", error);
+      setOutgoingJoinPending([]);
+    } else {
+      setOutgoingJoinPending((data ?? []) as { id: string; household_code: string }[]);
+    }
+  }, [user?.id]);
+
+  useEffect(() => {
+    void loadIncomingJoinRequests();
+  }, [loadIncomingJoinRequests]);
+
+  useEffect(() => {
+    void loadOutgoingJoinPending();
+  }, [loadOutgoingJoinPending]);
+
+  useEffect(() => {
+    if (!isValidHouseholdCode(normalizeHouseholdCode(profile?.household_id ?? ""))) return;
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void loadIncomingJoinRequests();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    const interval = window.setInterval(() => void loadIncomingJoinRequests(), 28000);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisible);
+      window.clearInterval(interval);
+    };
+  }, [profile?.household_id, loadIncomingJoinRequests]);
+
+  useEffect(() => {
+    if (!user?.id) return;
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void loadOutgoingJoinPending();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    const interval = window.setInterval(() => void loadOutgoingJoinPending(), 30000);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisible);
+      window.clearInterval(interval);
+    };
+  }, [user?.id, loadOutgoingJoinPending]);
 
   useEffect(() => {
     if (!user?.id) return;
@@ -699,9 +806,8 @@ export function SettingsView() {
     }
   }
 
-  async function handleJoinHousehold(importPreviousData: boolean) {
+  async function submitHouseholdJoinRequest(importPreviousData: boolean) {
     const nextId = pendingJoinCode;
-    const oldHouseholdId = normalizeHouseholdCode(profile?.household_id ?? "");
     if (!nextId || !user?.id) return;
     setJoinLoading(true);
     try {
@@ -710,61 +816,98 @@ export function SettingsView() {
         toast.error(lang === "he" ? "הקוד כבר לא קיים. נסה שוב." : "Code no longer exists.");
         return;
       }
-      // Move expenses first while profile.household_id still matches those rows (RLS).
-      if (importPreviousData && oldHouseholdId && oldHouseholdId !== nextId) {
-        const { error: migrateError } = await supabase
-          .from("expenses")
-          .update({ household_id: nextId })
-          .eq("user_id", user.id)
-          .eq("household_id", oldHouseholdId);
-        if (migrateError) {
-          toast.error(
-            lang === "he"
-              ? `ייבוא הנתונים נכשל: ${migrateError.message}`
-              : `Could not import your expenses: ${migrateError.message}`,
-          );
-          return;
-        }
-      }
-      const { error: updateProfileError } = await supabase
-        .from("profiles")
-        .update({ household_id: nextId })
-        .eq("id", user.id);
-      if (updateProfileError) {
-        toast.error(
-          lang === "he"
-            ? `הצטרפות למשק הבית נכשלה: ${updateProfileError.message}`
-            : `Failed to join household: ${updateProfileError.message}`,
-        );
+      const { data, error } = await supabase.rpc("submit_household_join_request", {
+        p_household_code: nextId,
+        p_import_previous_data: importPreviousData,
+      });
+      if (error) {
+        toast.error(error.message || t.householdJoinErrorGeneric);
         return;
       }
-      await refreshProfile();
-      const { data: refreshedProfile } = await supabase
-        .from("profiles")
-        .select("household_id")
-        .eq("id", user.id)
-        .maybeSingle();
-      if (normalizeHouseholdCode(refreshedProfile?.household_id ?? "") !== nextId) {
-        toast.error(
-          lang === "he"
-            ? "ההצטרפות עוד לא הסתנכרנה. נסה שוב בעוד רגע."
-            : "Join has not synced yet. Please try again in a moment.",
-        );
+      const res = data as { ok?: boolean; error?: string; duplicate?: boolean } | null;
+      if (!res?.ok) {
+        const code = typeof res?.error === "string" ? res.error : "";
+        if (code === "already_member") toast.error(t.householdJoinErrorAlreadyMember);
+        else toast.error(t.householdJoinErrorGeneric);
         return;
       }
-      setDisplayHouseholdCode(nextId);
       setJoinHouseholdId("");
       setPendingJoinCode("");
       setJoinConfirmOpen(false);
-      void loadHouseholdMembers();
+      void loadOutgoingJoinPending();
       toast.success(
-        lang === "he"
-          ? "הצטרפת בהצלחה למשק הבית. הנתונים המשותפים מוכנים."
-          : "Joined household successfully. Shared data is ready.",
+        res.duplicate ? t.householdJoinRequestDuplicate : t.householdJoinRequestSent,
       );
     } finally {
       setJoinLoading(false);
     }
+  }
+
+  async function approveJoinRequest(request: HouseholdJoinRequestRow) {
+    setJoinReviewActionLoading(true);
+    try {
+      const { data, error } = await supabase.rpc("approve_household_join_request", {
+        p_request_id: request.id,
+      });
+      if (error) {
+        toast.error(`${t.householdJoinApproveFailed}: ${error.message}`);
+        return;
+      }
+      const res = data as { ok?: boolean; error?: string } | null;
+      if (!res?.ok) {
+        toast.error(
+          `${t.householdJoinApproveFailed}${res?.error ? `: ${res.error}` : ""}`,
+        );
+        return;
+      }
+      setReviewJoinRequest(null);
+      void loadIncomingJoinRequests();
+      void loadHouseholdMembers();
+      toast.success(t.householdJoinApprovedToast);
+      window.location.reload();
+    } finally {
+      setJoinReviewActionLoading(false);
+    }
+  }
+
+  async function rejectJoinRequest(requestId: string) {
+    setJoinReviewActionLoading(true);
+    try {
+      const { data, error } = await supabase.rpc("reject_household_join_request", {
+        p_request_id: requestId,
+      });
+      if (error) {
+        toast.error(error.message);
+        return;
+      }
+      const res = data as { ok?: boolean } | null;
+      if (!res?.ok) {
+        toast.error(t.householdJoinErrorGeneric);
+        return;
+      }
+      setReviewJoinRequest(null);
+      void loadIncomingJoinRequests();
+      toast.success(t.householdJoinRejectedToast);
+    } finally {
+      setJoinReviewActionLoading(false);
+    }
+  }
+
+  async function cancelOutgoingJoinRequest(requestId: string) {
+    const { data, error } = await supabase.rpc("cancel_household_join_request", {
+      p_request_id: requestId,
+    });
+    if (error) {
+      toast.error(error.message);
+      return;
+    }
+    const res = data as { ok?: boolean } | null;
+    if (!res?.ok) {
+      toast.error(t.householdJoinErrorGeneric);
+      return;
+    }
+    void loadOutgoingJoinPending();
+    toast.success(lang === "he" ? "הבקשה בוטלה." : "Request cancelled.");
   }
 
   async function handleLogout() {
@@ -1032,13 +1175,36 @@ export function SettingsView() {
               >
                 {joinLoading
                   ? lang === "he"
-                    ? "מצטרף..."
-                    : "Joining..."
+                    ? "שולח..."
+                    : "Sending..."
                   : lang === "he"
-                    ? "הצטרפות למשק בית קיים"
-                    : "Join Household"}
+                    ? "שליחת בקשת הצטרפות"
+                    : "Request to join"}
               </Button>
             </div>
+            {outgoingJoinPending.length > 0 ? (
+              <ul className="space-y-2 rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2">
+                {outgoingJoinPending.map((row) => (
+                  <li
+                    key={row.id}
+                    className="flex flex-wrap items-center justify-between gap-2 text-sm leading-relaxed"
+                  >
+                    <span>
+                      {t.householdJoinOutgoingPending.replace("{{code}}", row.household_code)}
+                    </span>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="h-auto shrink-0 py-1 text-muted-foreground"
+                      onClick={() => void cancelOutgoingJoinRequest(row.id)}
+                    >
+                      {t.householdJoinCancelRequest}
+                    </Button>
+                  </li>
+                ))}
+              </ul>
+            ) : null}
             <p className="text-sm leading-relaxed text-muted-foreground">
               {lang === "he"
                 ? profile?.household_id
@@ -1068,6 +1234,44 @@ export function SettingsView() {
                     {user?.email?.trim().toLowerCase() === email.trim().toLowerCase()
                       ? " (אני)"
                       : ""}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+          <div className="space-y-2 rounded-lg border border-border/70 px-3 py-3" dir={dir}>
+            <p className="text-sm font-medium leading-relaxed text-muted-foreground">
+              {t.householdJoinIncomingTitle}
+            </p>
+            {incomingJoinLoading ? (
+              <p className="text-sm text-muted-foreground">
+                {lang === "he" ? "טוען..." : "Loading..."}
+              </p>
+            ) : incomingJoinRequests.length === 0 ? (
+              <p className="text-sm text-muted-foreground">{t.householdJoinIncomingEmpty}</p>
+            ) : (
+              <ul className="space-y-2">
+                {incomingJoinRequests.map((req) => (
+                  <li
+                    key={req.id}
+                    className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-border/60 px-2.5 py-2"
+                  >
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-medium leading-snug">
+                        {req.requester_email?.trim() || req.requester_id}
+                      </p>
+                      <p className="text-xs text-muted-foreground">
+                        {req.import_previous_data ? t.householdJoinReviewImportYes : t.householdJoinReviewImportNo}
+                      </p>
+                    </div>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="secondary"
+                      onClick={() => setReviewJoinRequest(req)}
+                    >
+                      {t.householdJoinReviewCta}
+                    </Button>
                   </li>
                 ))}
               </ul>
@@ -2216,31 +2420,107 @@ export function SettingsView() {
       </AlertDialog>
 
       <AlertDialog open={joinConfirmOpen} onOpenChange={setJoinConfirmOpen}>
-        <AlertDialogContent dir="rtl">
+        <AlertDialogContent dir={dir}>
           <AlertDialogHeader>
-            <AlertDialogTitle>אישור הצטרפות</AlertDialogTitle>
-            <AlertDialogDescription>
-              האם תרצה לייבא את הנתונים הקודמים שלך למשק הבית המשותף?
+            <AlertDialogTitle>{t.householdJoinConfirmTitle}</AlertDialogTitle>
+            <AlertDialogDescription className="text-start leading-relaxed">
+              {t.householdJoinConfirmDesc}
             </AlertDialogDescription>
           </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel disabled={joinLoading}>ביטול</AlertDialogCancel>
-            <AlertDialogAction
-              onClick={() => {
-                void handleJoinHousehold(false);
-              }}
+          <AlertDialogFooter className="flex-col gap-2 sm:flex-col">
+            <Button
+              type="button"
+              onClick={() => void submitHouseholdJoinRequest(false)}
               disabled={joinLoading}
+              className="w-full"
             >
-              לא, רק להצטרף
-            </AlertDialogAction>
-            <AlertDialogAction
-              onClick={() => {
-                void handleJoinHousehold(true);
-              }}
+              {t.householdJoinOptionFresh}
+            </Button>
+            <Button
+              type="button"
+              onClick={() => void submitHouseholdJoinRequest(true)}
               disabled={joinLoading}
+              className="w-full"
             >
-              כן, לייבא נתונים
-            </AlertDialogAction>
+              {t.householdJoinOptionImport}
+            </Button>
+            <AlertDialogCancel disabled={joinLoading} className="w-full">
+              {t.cancel}
+            </AlertDialogCancel>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog
+        open={reviewJoinRequest !== null}
+        onOpenChange={(open) => {
+          if (!open) setReviewJoinRequest(null);
+        }}
+      >
+        <AlertDialogContent dir={dir} className="max-h-[90vh] overflow-y-auto">
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t.householdJoinReviewTitle}</AlertDialogTitle>
+            <AlertDialogDescription asChild>
+              <div className="space-y-3 text-start text-sm leading-relaxed text-muted-foreground">
+                <p>
+                  <span className="font-medium text-foreground">{t.householdJoinReviewEmail}: </span>
+                  {reviewJoinRequest?.requester_email?.trim() || reviewJoinRequest?.requester_id}
+                </p>
+                <p className="rounded-md border border-border/60 bg-muted/30 px-3 py-2">
+                  {reviewJoinRequest?.import_previous_data
+                    ? t.householdJoinReviewImportYes
+                    : t.householdJoinReviewImportNo}
+                </p>
+                <p>
+                  {reviewJoinRequest?.import_previous_data
+                    ? t.householdJoinReviewMergeHint
+                    : t.householdJoinReviewReplaceHint}
+                </p>
+                {reviewJoinRequest ? (
+                  <div className="space-y-1">
+                    <p className="font-medium text-foreground">{t.householdJoinCategoryPreview}</p>
+                    <ul className="max-h-40 space-y-1 overflow-y-auto rounded-md border border-border/50 px-2 py-2 text-xs">
+                      {parseJoinCategoryPreview(reviewJoinRequest.category_preview).length === 0 ? (
+                        <li className="text-muted-foreground">
+                          {lang === "he" ? "אין רשומות" : "None listed"}
+                        </li>
+                      ) : (
+                        parseJoinCategoryPreview(reviewJoinRequest.category_preview).map((c, i) => (
+                          <li key={`${c.type}-${c.name}-${i}`} className="flex justify-between gap-2">
+                            <span className="min-w-0 truncate">{c.name}</span>
+                            <span className="shrink-0 text-muted-foreground">{c.type}</span>
+                          </li>
+                        ))
+                      )}
+                    </ul>
+                  </div>
+                ) : null}
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter className="flex-col gap-2 sm:flex-row sm:justify-between">
+            <AlertDialogCancel disabled={joinReviewActionLoading}>{t.cancel}</AlertDialogCancel>
+            <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
+              <Button
+                type="button"
+                variant="outline"
+                disabled={joinReviewActionLoading || !reviewJoinRequest}
+                onClick={() => {
+                  if (reviewJoinRequest) void rejectJoinRequest(reviewJoinRequest.id);
+                }}
+              >
+                {t.householdJoinReject}
+              </Button>
+              <Button
+                type="button"
+                disabled={joinReviewActionLoading || !reviewJoinRequest}
+                onClick={() => {
+                  if (reviewJoinRequest) void approveJoinRequest(reviewJoinRequest);
+                }}
+              >
+                {t.householdJoinApprove}
+              </Button>
+            </div>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
@@ -2486,6 +2766,7 @@ export function SettingsView() {
               if (user?.id) {
                 const byId = new Map(incomeSources.map((c) => [c.id, c] as const));
                 const uniqueCategoryIds = [...new Set(rows.map((r) => r.categoryId).filter(Boolean))];
+                const hm = normalizeHouseholdCode(profile?.household_id ?? "");
                 const categoriesToUpsert = uniqueCategoryIds
                   .filter((id): id is string => typeof id === "string" && isUuidLike(id))
                   .map((id) => {
@@ -2495,16 +2776,17 @@ export function SettingsView() {
                     return {
                       id,
                       user_id: user.id,
+                      household_id: hm,
                       type: "income" as const,
                       name: local?.name ?? fallbackName,
                       color: local?.color ?? "#737373",
                       icon: local?.iconKey ?? "tag",
                     };
                   });
-                if (categoriesToUpsert.length) {
+                if (categoriesToUpsert.length && isValidHouseholdCode(hm)) {
                   const { error: categoriesError } = await supabase
                     .from("categories")
-                    .upsert(categoriesToUpsert, { onConflict: "user_id,name,type" });
+                    .upsert(categoriesToUpsert, { onConflict: "household_id,name,type" });
                   if (categoriesError) {
                     toast.error(categoriesError.message, { id: IMPORT_TOAST_ID.incomes });
                     return { ok: false, error: categoriesError.message };
@@ -2568,6 +2850,7 @@ export function SettingsView() {
               if (user?.id) {
                 const byId = new Map(expenseCategories.map((c) => [c.id, c] as const));
                 const uniqueCategoryIds = [...new Set(rows.map((r) => r.categoryId).filter(Boolean))];
+                const hm = normalizeHouseholdCode(profile?.household_id ?? "");
                 const categoriesToUpsert = uniqueCategoryIds
                   .filter((id): id is string => typeof id === "string" && isUuidLike(id))
                   .map((id) => {
@@ -2577,16 +2860,17 @@ export function SettingsView() {
                     return {
                       id,
                       user_id: user.id,
+                      household_id: hm,
                       type: "expense" as const,
                       name: local?.name ?? fallbackName,
                       color: local?.color ?? "#737373",
                       icon: local?.iconKey ?? "tag",
                     };
                   });
-                if (categoriesToUpsert.length) {
+                if (categoriesToUpsert.length && isValidHouseholdCode(hm)) {
                   const { error: categoriesError } = await supabase
                     .from("categories")
-                    .upsert(categoriesToUpsert, { onConflict: "user_id,name,type" });
+                    .upsert(categoriesToUpsert, { onConflict: "household_id,name,type" });
                   if (categoriesError) {
                     toast.error(categoriesError.message, { id: IMPORT_TOAST_ID.expenses });
                     return { ok: false, error: categoriesError.message };

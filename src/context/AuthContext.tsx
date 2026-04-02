@@ -64,7 +64,10 @@ async function withTimeout<T>(run: () => Promise<T>, ms: number, label: string):
 }
 
 type EnsureProfileOptions = {
-  /** If set and the code exists in `households`, link this user to that household instead of creating a new one. */
+  /**
+   * If set and the code exists in `households`, submit a pending join request (requires approval).
+   * The profile always keeps a dedicated household until a member approves the request.
+   */
   joinHouseholdCode?: string;
   isAdmin?: boolean;
 };
@@ -108,11 +111,19 @@ async function ensureProfile(user: User, options?: EnsureProfileOptions) {
       const current = normalizeHouseholdCode(existing.household_id ?? "");
       if (current !== normalizedJoin) {
         await ensureHouseholdExists(normalizedJoin, user.id);
-        await supabase.from("profiles").update({ household_id: normalizedJoin }).eq("id", user.id);
-        console.log("[Auth] Profile linked to requested household", {
-          userId: user.id,
-          householdId: normalizedJoin,
+        const { data: jr, error: jrErr } = await supabase.rpc("submit_household_join_request", {
+          p_household_code: normalizedJoin,
+          p_import_previous_data: false,
         });
+        if (jrErr) {
+          console.error("[Auth] submit_household_join_request failed", jrErr);
+        } else {
+          console.log("[Auth] Household join request submitted", {
+            userId: user.id,
+            targetHousehold: normalizedJoin,
+            result: jr,
+          });
+        }
       }
       return;
     }
@@ -126,11 +137,9 @@ async function ensureProfile(user: User, options?: EnsureProfileOptions) {
   }
   console.log("[Auth] Profile not found — creating with new or joined household", { userId: user.id });
 
-  const resolvedHousehold = wantsJoin
-    ? normalizedJoin
-    : await generateUniqueHouseholdCode(user.id);
+  const resolvedHousehold = await generateUniqueHouseholdCode(user.id);
   if (wantsJoin) {
-    await ensureHouseholdExists(resolvedHousehold, user.id);
+    await ensureHouseholdExists(normalizedJoin, user.id);
   }
 
   const { error: upsertError } = await supabase.from("profiles").upsert({
@@ -146,6 +155,18 @@ async function ensureProfile(user: User, options?: EnsureProfileOptions) {
     userId: user.id,
     householdId: resolvedHousehold,
   });
+
+  if (wantsJoin && !upsertError) {
+    const { data: jr, error: jrErr } = await supabase.rpc("submit_household_join_request", {
+      p_household_code: normalizedJoin,
+      p_import_previous_data: false,
+    });
+    if (jrErr) {
+      console.error("[Auth] submit_household_join_request after signup failed", jrErr);
+    } else {
+      console.log("[Auth] Join request submitted after signup", { userId: user.id, result: jr });
+    }
+  }
 }
 
 async function ensureValidHouseholdForProfile(

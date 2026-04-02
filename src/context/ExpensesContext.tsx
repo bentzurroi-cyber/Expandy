@@ -67,17 +67,18 @@ function supabaseErrorMessage(error: unknown): string {
 type CategoryUpsertRow = {
   id: string;
   user_id: string;
+  household_id: string;
   name: string;
   type: string;
   color: string;
   icon: string;
 };
 
-/** Avoid unique (user_id, type, name) violations when the batch has duplicate names. */
+/** Avoid unique (household_id, type, name) violations when the batch has duplicate names. */
 function dedupeCategoryUpsertRows(rows: CategoryUpsertRow[]): CategoryUpsertRow[] {
   const map = new Map<string, CategoryUpsertRow>();
   for (const r of rows) {
-    const k = `${r.user_id}|${r.type}|${normalizeOptionName(r.name)}`;
+    const k = `${r.household_id}|${r.type}|${normalizeOptionName(r.name)}`;
     const prev = map.get(k);
     if (!prev || r.id < prev.id) map.set(k, r);
   }
@@ -89,7 +90,7 @@ async function upsertCategoriesToSupabase(
 ): Promise<{ error: unknown | null }> {
   if (!rows.length) return { error: null };
   const { error } = await supabase.from("categories").upsert(rows, {
-    onConflict: "user_id,name,type",
+    onConflict: "household_id,name,type",
   });
   return { error };
 }
@@ -371,15 +372,17 @@ function toDbCategoryId(value: string | undefined): string | null {
   return typeof value === "string" && isStandardUuid(value) ? value : null;
 }
 
-/** Row shape for `public.categories` (user-scoped, PK `id`). */
+/** Row shape for `public.categories` (unique per household: household_id + name + type). */
 function categoryToSupabaseRow(
   c: Pick<Category, "id" | "name" | "color" | "iconKey">,
   userId: string,
   type: "expense" | "income",
+  householdId: string,
 ) {
   return {
     id: c.id,
     user_id: userId,
+    household_id: householdId,
     name: c.name,
     type,
     color: c.color,
@@ -387,13 +390,12 @@ function categoryToSupabaseRow(
   };
 }
 
-function scheduleDeleteCategoryFromSupabase(userId: string, categoryId: string) {
-  if (!isStandardUuid(userId) || !isStandardUuid(categoryId)) return;
-  void supabase
-    .from("categories")
-    .delete()
-    .eq("id", categoryId)
-    .eq("user_id", userId);
+function scheduleDeleteCategoryFromSupabase(
+  householdId: string,
+  categoryId: string,
+) {
+  if (!isValidHouseholdCode(householdId) || !isStandardUuid(categoryId)) return;
+  void supabase.from("categories").delete().eq("id", categoryId).eq("household_id", householdId);
 }
 
 function normalizeCategoryDisplayLimit(value: unknown): number {
@@ -967,10 +969,14 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     async function loadCategoriesFromSupabase() {
       if (authLoading || !session || !user?.id) return;
-      const { data, error } = await supabase
-        .from("categories")
-        .select("id,name,color,icon,type")
-        .eq("user_id", user.id);
+      const hm = normalizeHouseholdCode(profile?.household_id ?? "");
+      let q = supabase.from("categories").select("id,name,color,icon,type");
+      if (isValidHouseholdCode(hm)) {
+        q = q.eq("household_id", hm);
+      } else {
+        q = q.eq("user_id", user.id);
+      }
+      const { data, error } = await q;
       if (error || !Array.isArray(data)) return;
       const expenseRows = data
         .filter((r) => String((r as { type?: unknown }).type ?? "") === "expense")
@@ -1015,16 +1021,16 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
       );
     }
     void loadCategoriesFromSupabase();
-  }, [authLoading, session, user?.id, householdId]);
+  }, [authLoading, session, user?.id, householdId, profile?.household_id]);
   useEffect(() => {
     if (authLoading || !session || !user?.id || !isValidHouseholdCode(householdId)) return;
     const rawRows: CategoryUpsertRow[] = [
       ...expenseCategoriesForStorage
         .filter((c) => isStandardUuid(c.id))
-        .map((c) => categoryToSupabaseRow(c, user.id, "expense")),
+        .map((c) => categoryToSupabaseRow(c, user.id, "expense", householdId)),
       ...incomeSourcesForStorage
         .filter((c) => isStandardUuid(c.id))
-        .map((c) => categoryToSupabaseRow(c, user.id, "income")),
+        .map((c) => categoryToSupabaseRow(c, user.id, "income", householdId)),
     ];
     const rows = dedupeCategoryUpsertRows(rawRows);
     if (!rows.length) return;
@@ -1069,6 +1075,7 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
           cat,
           cloud.userId,
           input.type === "income" ? "income" : "expense",
+          cloud.householdId,
         );
         const { error: catErr } = await upsertCategoriesToSupabase([row]);
         if (catErr) {
@@ -1641,8 +1648,9 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
                 color: local?.color ?? "#737373",
                 iconKey: local?.iconKey ?? "tag",
               },
-              cloud.householdId,
+              cloud.userId,
               "income",
+              cloud.householdId,
             );
           });
         if (categoryRows.length) {
@@ -1743,8 +1751,9 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
                 color: local?.color ?? "#737373",
                 iconKey: local?.iconKey ?? "tag",
               },
-              cloud.householdId,
+              cloud.userId,
               "expense",
+              cloud.householdId,
             );
           });
         if (categoryRows.length) {
@@ -2284,12 +2293,12 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
         );
       }
       mergeBudgetOnExpenseCategoryDeleted(id, moveToCategoryId);
-      if (!isBuiltin && user?.id) {
-        scheduleDeleteCategoryFromSupabase(user.id, id);
+      if (!isBuiltin && isValidHouseholdCode(householdId)) {
+        scheduleDeleteCategoryFromSupabase(householdId, id);
       }
       setExpenseCategoryOrder((prev) => prev.filter((x) => x !== id));
     },
-    [mergeBudgetOnExpenseCategoryDeleted, user?.id],
+    [householdId, mergeBudgetOnExpenseCategoryDeleted, user?.id],
   );
 
   const reorderExpenseCategories = useCallback((orderedIds: string[]) => {
@@ -2384,12 +2393,12 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
           ),
         );
       }
-      if (!isBuiltin && user?.id) {
-        scheduleDeleteCategoryFromSupabase(user.id, id);
+      if (!isBuiltin && isValidHouseholdCode(householdId)) {
+        scheduleDeleteCategoryFromSupabase(householdId, id);
       }
       setIncomeCategoryOrder((prev) => prev.filter((x) => x !== id));
     },
-    [user?.id],
+    [householdId, user?.id],
   );
 
   const reorderIncomeSources = useCallback((orderedIds: string[]) => {
@@ -2685,7 +2694,7 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
       await Promise.all([
         supabase.from("expenses").delete().eq("household_id", householdId),
         supabase.from("assets").delete().eq("household_id", householdId),
-        supabase.from("categories").delete().eq("user_id", user.id),
+        supabase.from("categories").delete().eq("household_id", householdId),
       ]);
     }
     setExpenses([]);
