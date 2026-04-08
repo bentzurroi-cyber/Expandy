@@ -34,6 +34,12 @@ const ASSET_TYPE_EN: Record<string, string> = {
   pension: "Pension / study fund",
 };
 
+const ASSET_TYPE_HE: Record<string, string> = {
+  liquid: "חשבונות נזילים",
+  portfolio: "תיקי השקעות",
+  pension: "פנסיה / השתלמות",
+};
+
 export function localizedExpenseCategoryName(id: string, storedName: string, lang: Language): string {
   if (lang === "en" && EXPENSE_CATEGORY_EN[id]) return EXPENSE_CATEGORY_EN[id]!;
   return storedName;
@@ -54,7 +60,10 @@ export function localizedDestinationAccountName(id: string, storedName: string, 
   return storedName;
 }
 
+/** `id` is the stored type slug (e.g. liquid, portfolio). */
 export function localizedAssetTypeName(id: string, storedName: string, lang: Language): string {
-  if (lang === "en" && ASSET_TYPE_EN[id]) return ASSET_TYPE_EN[id]!;
+  const key = id.trim().toLowerCase();
+  if (lang === "he" && ASSET_TYPE_HE[key]) return ASSET_TYPE_HE[key]!;
+  if (lang === "en" && ASSET_TYPE_EN[key]) return ASSET_TYPE_EN[key]!;
   return storedName;
 }

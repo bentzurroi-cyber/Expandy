@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ChevronDown } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { AssetEditShell } from "@/components/assets/AssetEditShell";
+import { SavingsGoalsAssetsCollapsible } from "@/components/assets/SavingsGoalsAssetsCollapsible";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -26,13 +28,19 @@ import { supabase } from "@/lib/supabase";
 import { DEFAULT_CURRENCY } from "@/data/mock";
 import { convertToILS, prefetchFxRate } from "@/lib/fx";
 import { localizedAssetTypeName } from "@/lib/defaultEntityLabels";
-import { formatCurrencyCompact, formatIls, formatIlsCompact, isShekelCurrency } from "@/lib/format";
+import {
+  formatCurrencyCompact,
+  formatIls,
+  formatIlsCompact,
+  formatIlsWholeCeil,
+  isShekelCurrency,
+} from "@/lib/format";
 import { formatNumericInput, parseNumericInput } from "@/utils/formatters";
 import {
+  formatLocalIsoDate,
   formatYearMonth,
   hebrewMonthYearLabel,
   monthYearShort,
-  parseLocalIsoDate,
   type YearMonth,
 } from "@/lib/month";
 import { toast } from "sonner";
@@ -134,21 +142,25 @@ export function AssetsView({ isActive = true }: { isActive?: boolean }) {
     setBalance,
     setAccountCurrency,
     updateAccountMeta,
+    updateAccountAssetKind,
     deleteAccount,
+    removeAccountFromMonth,
+    getAssetHasRowsOutsideMonth,
     addSnapshotAccount,
     assetTypes,
     assetNamePresetsFor,
   } = useAssets();
-
   const [addType, setAddType] = useState<string>("liquid");
   const [addName, setAddName] = useState("");
   const [addBalance, setAddBalance] = useState("");
   const [addCurrency, setAddCurrency] = useState<string>(DEFAULT_CURRENCY);
   const [addFxPreviewTick, setAddFxPreviewTick] = useState(0);
   const [editingAssetId, setEditingAssetId] = useState<string | null>(null);
-  const [balanceEntryMonth, setBalanceEntryMonth] = useState<YearMonth>(() =>
-    formatYearMonth(new Date()),
-  );
+  const [balanceEntryIso, setBalanceEntryIso] = useState(() => formatLocalIsoDate(new Date()));
+  const balanceEntryMonth = useMemo((): YearMonth => {
+    const ym = balanceEntryIso.slice(0, 7);
+    return /^\d{4}-\d{2}$/.test(ym) ? (ym as YearMonth) : formatYearMonth(new Date());
+  }, [balanceEntryIso]);
   const [assetChartOn, setAssetChartOn] = useState<Record<string, boolean>>(
     {},
   );
@@ -159,6 +171,12 @@ export function AssetsView({ isActive = true }: { isActive?: boolean }) {
   const [rangeStartYm, setRangeStartYm] = useState<YearMonth | "all">("all");
   const [rangeEndYm, setRangeEndYm] = useState<YearMonth | "all">("all");
   const [listViewYm, setListViewYm] = useState<YearMonth>(() => formatYearMonth(new Date()));
+  const [addAssetSectionOpen, setAddAssetSectionOpen] = useState(true);
+
+  const probeAssetDeleteSpan = useCallback(
+    (id: string) => getAssetHasRowsOutsideMonth(id, currentMonth),
+    [currentMonth, getAssetHasRowsOutsideMonth],
+  );
 
   const wasActiveRef = useRef(false);
   useEffect(() => {
@@ -172,7 +190,9 @@ export function AssetsView({ isActive = true }: { isActive?: boolean }) {
   }, [isActive]);
 
   const parsedAddBalance = useMemo(() => parseNumericInput(addBalance), [addBalance]);
-  const rateDate = `${balanceEntryMonth}-01`;
+  const rateDate = /^\d{4}-\d{2}-\d{2}$/.test(balanceEntryIso)
+    ? balanceEntryIso
+    : `${formatYearMonth(new Date())}-01`;
   const addBalanceRounded =
     typeof parsedAddBalance === "number" && Number.isFinite(parsedAddBalance)
       ? Math.round(parsedAddBalance * 100) / 100
@@ -266,16 +286,14 @@ export function AssetsView({ isActive = true }: { isActive?: boolean }) {
     [monthOptions],
   );
 
-  const total = useMemo(
-    () =>
-      (currentAssets ?? []).reduce((sum, a) => {
-        if (!a || typeof a.balance !== "number" || !Number.isFinite(a.balance)) return sum;
-        const typ = typeof a.type === "string" ? a.type : "";
-        if (activeExcludeTypeId && typ === activeExcludeTypeId) return sum;
-        return sum + convertToILS(a.balance, a.currency ?? "ILS", `${currentMonth}-01`);
-      }, 0),
-    [currentAssets, currentMonth, fxTick, activeExcludeTypeId],
-  );
+  const total = useMemo(() => {
+    return (currentAssets ?? []).reduce((sum, a) => {
+      if (!a || typeof a.balance !== "number" || !Number.isFinite(a.balance)) return sum;
+      const typ = typeof a.type === "string" ? a.type : "";
+      if (activeExcludeTypeId && typ === activeExcludeTypeId) return sum;
+      return sum + convertToILS(a.balance, a.currency ?? "ILS", `${currentMonth}-01`);
+    }, 0);
+  }, [activeExcludeTypeId, currentAssets, currentMonth, fxTick]);
 
   const currentSorted = useMemo(
     () =>
@@ -371,12 +389,17 @@ export function AssetsView({ isActive = true }: { isActive?: boolean }) {
       return;
     }
     const balanceStored = Math.round(parsed * 100) / 100;
-    const res = await addSnapshotAccount(balanceEntryMonth, {
-      type: addType,
-      name,
-      balance: balanceStored,
-      currency: addCurrency,
-    });
+    const ym = balanceEntryIso.slice(0, 7) as YearMonth;
+    const res = await addSnapshotAccount(
+      ym,
+      {
+        type: addType,
+        name,
+        balance: balanceStored,
+        currency: addCurrency,
+      },
+      { balanceDate: balanceEntryIso },
+    );
     if (!res.ok) {
       toast.error(
         lang === "he" ? `שמירת נכס נכשלה: ${res.error}` : `Could not save asset: ${res.error}`,
@@ -411,14 +434,14 @@ export function AssetsView({ isActive = true }: { isActive?: boolean }) {
               </SelectContent>
             </Select>
           </div>
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-            <div className="min-w-0">
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between sm:gap-6">
+            <div className="min-w-0 flex-1">
               <p className="text-sm text-muted-foreground">{t.totalNetWorth}</p>
-              <p className="mt-1 text-3xl font-semibold tabular-nums">
-                {formatIls(total)}
+              <p className="mt-1 text-3xl font-semibold tabular-nums leading-tight">
+                {formatIlsWholeCeil(total)}
               </p>
             </div>
-            <div className="w-full shrink-0 space-y-1.5 sm:max-w-[16rem]">
+            <div className="w-full shrink-0 space-y-1.5 sm:w-[16rem] sm:max-w-[16rem]">
               <Label
                 htmlFor="asset-net-scope"
                 className="text-xs text-muted-foreground"
@@ -468,12 +491,33 @@ export function AssetsView({ isActive = true }: { isActive?: boolean }) {
         </CardContent>
       </Card>
 
-      <Card className="border-border/80 shadow-none">
-        <CardHeader>
-          <CardTitle className="text-base">{t.assetAddSection}</CardTitle>
-          <CardDescription>{hebrewMonthYearLabel(balanceEntryMonth)}</CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
+      <div className="rounded-xl border border-border/70 bg-muted/15" dir={dir}>
+        <button
+          type="button"
+          className="flex w-full items-center justify-between gap-2 px-3 py-3 text-start transition-colors hover:bg-muted/30"
+          onClick={() => setAddAssetSectionOpen((v) => !v)}
+          aria-expanded={addAssetSectionOpen}
+        >
+          <div className="min-w-0">
+            <p className="text-sm font-medium leading-snug">{t.assetAddSection}</p>
+            <p className="text-xs text-muted-foreground">
+              {lang === "he"
+                ? hebrewMonthYearLabel(balanceEntryMonth)
+                : monthYearShort(balanceEntryMonth)}
+            </p>
+          </div>
+          <ChevronDown
+            className={cn(
+              "size-5 shrink-0 text-muted-foreground transition-transform duration-200",
+              addAssetSectionOpen && "rotate-180",
+            )}
+            aria-hidden
+          />
+        </button>
+        {addAssetSectionOpen ? (
+          <div className="border-t border-border/60 px-3 pb-3 pt-1">
+            <Card className="border-0 bg-transparent shadow-none">
+              <CardContent className="space-y-4 px-0 pt-2">
           <form
             className="space-y-4"
             autoComplete="on"
@@ -487,10 +531,9 @@ export function AssetsView({ isActive = true }: { isActive?: boolean }) {
               <DatePickerField
                 id="asset-balance-month"
                 label={t.assetBalanceEntryMonth}
-                value={`${balanceEntryMonth}-01`}
+                value={balanceEntryIso}
                 onChange={(iso) => {
-                  const d = parseLocalIsoDate(iso);
-                  if (d) setBalanceEntryMonth(formatYearMonth(d));
+                  if (/^\d{4}-\d{2}-\d{2}$/.test(iso)) setBalanceEntryIso(iso);
                 }}
                 triggerClassName="h-12 min-h-12 rounded-xl border border-input bg-background px-3.5 py-2.5 ps-3"
               />
@@ -600,8 +643,11 @@ export function AssetsView({ isActive = true }: { isActive?: boolean }) {
             {t.assetAddButton}
           </Button>
           </form>
-        </CardContent>
-      </Card>
+              </CardContent>
+            </Card>
+          </div>
+        ) : null}
+      </div>
 
       <Card className="border-border/80 shadow-none">
         <CardHeader>
@@ -912,20 +958,41 @@ export function AssetsView({ isActive = true }: { isActive?: boolean }) {
         </CardContent>
       </Card>
 
+      <SavingsGoalsAssetsCollapsible />
+
       <AssetEditShell
         asset={editingAsset}
         currencies={currencies}
-        month={currentMonth}
-        onMonthChange={setCurrentMonth}
+        assetTypes={assetTypes}
+        snapshotMonth={currentMonth}
         onOpenChange={(open) => {
           if (!open) setEditingAssetId(null);
         }}
-        onSave={(id, balance, currency, name) => {
-          setBalance(id, balance);
-          setAccountCurrency(id, currency);
+        onSave={async (id, balance, currency, name, balanceDate, nextAssetTypeId) => {
+          const rowYm: YearMonth | null =
+            /^\d{4}-\d{2}-\d{2}$/.test(balanceDate) && /^\d{4}-\d{2}$/.test(balanceDate.slice(0, 7))
+              ? (balanceDate.slice(0, 7) as YearMonth)
+              : null;
+          const targetYm = rowYm ?? currentMonth;
+          if (rowYm && rowYm !== currentMonth) setCurrentMonth(rowYm);
+          const prevType = editingAsset?.type ?? "";
+          if (nextAssetTypeId.trim() && nextAssetTypeId.trim() !== prevType) {
+            await updateAccountAssetKind(id, nextAssetTypeId.trim());
+          }
+          setBalance(id, balance, balanceDate, targetYm);
+          setAccountCurrency(id, currency, targetYm);
           updateAccountMeta(id, { name });
         }}
-        onDelete={(id) => {
+        probeAssetRowsOutsideMonth={probeAssetDeleteSpan}
+        onRemoveFromMonth={async (id) => {
+          const r = await removeAccountFromMonth(id, currentMonth);
+          if (r.ok) {
+            toast.success(t.assetDeletedFromMonthToast);
+            setEditingAssetId(null);
+          }
+          return r.ok;
+        }}
+        onDeletePermanently={(id) => {
           deleteAccount(id);
           setEditingAssetId(null);
         }}

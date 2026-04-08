@@ -43,6 +43,13 @@ function clampCategoryDisplayLimit(value: unknown): number {
   return Math.max(1, Math.min(8, Math.floor(parsed)));
 }
 
+function clampReviewDay(value: unknown): number | null {
+  if (value == null) return null;
+  const n = Math.floor(Number(value));
+  if (!Number.isFinite(n) || n < 1 || n > 31) return null;
+  return n;
+}
+
 function normalizeProfileRow(row: ProfileRow): ProfileRow {
   const raw = (row as unknown as Record<string, unknown>)
     .assets_total_exclude_type_id;
@@ -51,6 +58,7 @@ function normalizeProfileRow(row: ProfileRow): ProfileRow {
     ...row,
     category_display_limit: clampCategoryDisplayLimit(row.category_display_limit),
     assets_total_exclude_type_id: ex,
+    review_day: clampReviewDay((row as unknown as Record<string, unknown>).review_day),
   };
 }
 
@@ -91,7 +99,6 @@ async function ensureProfile(user: User, options?: EnsureProfileOptions) {
 
   const { wantsJoin, normalizedJoin } = await resolveWantsJoin(options?.joinHouseholdCode);
 
-  console.log("[Auth] Profile fetch started", { userId: user.id, wantsJoin });
   const { data: existing, error } = await supabase
     .from("profiles")
     .select(
@@ -103,26 +110,16 @@ async function ensureProfile(user: User, options?: EnsureProfileOptions) {
     console.error("[Auth] Profile fetch failed", { userId: user.id, error: error.message });
   }
   if (existing) {
-    console.log("[Auth] Profile found", {
-      userId: user.id,
-      householdId: existing.household_id,
-    });
     if (wantsJoin) {
       const current = normalizeHouseholdCode(existing.household_id ?? "");
       if (current !== normalizedJoin) {
         await ensureHouseholdExists(normalizedJoin, user.id);
-        const { data: jr, error: jrErr } = await supabase.rpc("submit_household_join_request", {
+        const { error: jrErr } = await supabase.rpc("submit_household_join_request", {
           p_household_code: normalizedJoin,
           p_import_previous_data: false,
         });
         if (jrErr) {
           console.error("[Auth] submit_household_join_request failed", jrErr);
-        } else {
-          console.log("[Auth] Household join request submitted", {
-            userId: user.id,
-            targetHousehold: normalizedJoin,
-            result: jr,
-          });
         }
       }
       return;
@@ -131,12 +128,9 @@ async function ensureProfile(user: User, options?: EnsureProfileOptions) {
       const assigned = await generateUniqueHouseholdCode(user.id);
       await ensureHouseholdExists(assigned, user.id);
       await supabase.from("profiles").update({ household_id: assigned }).eq("id", user.id);
-      console.log("[Auth] Household ID assigned (invalid → new)", { userId: user.id, householdId: assigned });
     }
     return;
   }
-  console.log("[Auth] Profile not found — creating with new or joined household", { userId: user.id });
-
   const resolvedHousehold = await generateUniqueHouseholdCode(user.id);
   if (wantsJoin) {
     await ensureHouseholdExists(normalizedJoin, user.id);
@@ -151,20 +145,14 @@ async function ensureProfile(user: User, options?: EnsureProfileOptions) {
   if (upsertError) {
     console.error("[Auth] Profile upsert failed", { userId: user.id, error: upsertError.message });
   }
-  console.log("[Auth] Household ID assigned", {
-    userId: user.id,
-    householdId: resolvedHousehold,
-  });
 
   if (wantsJoin && !upsertError) {
-    const { data: jr, error: jrErr } = await supabase.rpc("submit_household_join_request", {
+    const { error: jrErr } = await supabase.rpc("submit_household_join_request", {
       p_household_code: normalizedJoin,
       p_import_previous_data: false,
     });
     if (jrErr) {
       console.error("[Auth] submit_household_join_request after signup failed", jrErr);
-    } else {
-      console.log("[Auth] Join request submitted after signup", { userId: user.id, result: jr });
     }
   }
 }
@@ -184,6 +172,7 @@ async function ensureValidHouseholdForProfile(
       default_payment_method_id: "",
       default_destination_account_id: "",
       category_display_limit: 8,
+      review_day: null,
     };
     const { data, error } = await supabase
       .from("profiles")
@@ -234,12 +223,11 @@ function guestProfileFor(user: User): ProfileRow {
     default_destination_account_id: "",
     category_display_limit: 8,
     assets_total_exclude_type_id: "",
+    review_day: null,
   };
 }
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  console.log("AuthContext Mounting...");
-
   const [session, setSession] = useState<Session | null>(null);
   const [user, setUser] = useState<User | null>(null);
   const [profile, setProfile] = useState<ProfileRow | null>(null);
@@ -247,53 +235,42 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true);
 
   const fetchProfileByUserId = useCallback(async (userId: string) => {
-    console.log("[Auth] Profile fetch started", { userId });
-    const selectWithAssets =
-      "id, email, household_id, is_admin, default_payment_method_id, default_destination_account_id, category_display_limit, assets_total_exclude_type_id";
-    const selectWithoutAssets =
-      "id, email, household_id, is_admin, default_payment_method_id, default_destination_account_id, category_display_limit";
+    const profileSelectBundles = [
+      "id, email, household_id, is_admin, default_payment_method_id, default_destination_account_id, category_display_limit, assets_total_exclude_type_id, review_day",
+      "id, email, household_id, is_admin, default_payment_method_id, default_destination_account_id, category_display_limit, assets_total_exclude_type_id",
+      "id, email, household_id, is_admin, default_payment_method_id, default_destination_account_id, category_display_limit, review_day",
+      "id, email, household_id, is_admin, default_payment_method_id, default_destination_account_id, category_display_limit",
+    ] as const;
 
-    const initial = await withTimeout(
-      async () =>
-        await supabase
-          .from("profiles")
-          .select(selectWithAssets)
-          .eq("id", userId)
-          .maybeSingle(),
-      5000,
-      "Profile fetch",
-    );
+    let data: unknown = null;
+    let lastError: { message?: string } | null = null;
 
-    // Backwards-compatibility: older DBs might not have the column yet.
-    // Supabase types can get "locked" to the first select column set, so widen here.
-    let data: unknown = initial.data;
-    let error: any = initial.error;
-
-    if (error) {
-      const msg = error.message?.toLowerCase?.() ?? String(error.message).toLowerCase();
-      const maybeMissingColumn =
-        msg.includes("assets_total_exclude_type_id") || msg.includes("does not exist");
-      if (maybeMissingColumn) {
-        const fallback = await withTimeout(
-          async () =>
-            await supabase
-              .from("profiles")
-              .select(selectWithoutAssets)
-              .eq("id", userId)
-              .maybeSingle(),
-          5000,
-          "Profile fetch (fallback)",
-        );
-        data = fallback.data;
-        error = fallback.error;
+    for (const cols of profileSelectBundles) {
+      const res = await withTimeout(
+        async () =>
+          await supabase.from("profiles").select(cols).eq("id", userId).maybeSingle(),
+        5000,
+        "Profile fetch",
+      );
+      if (!res.error) {
+        data = res.data;
+        lastError = null;
+        break;
       }
+      lastError = res.error;
+      const msg = String(res.error?.message ?? "").toLowerCase();
+      const maybeMissingColumn =
+        msg.includes("does not exist") ||
+        msg.includes("column") ||
+        msg.includes("review_day") ||
+        msg.includes("assets_total_exclude_type_id");
+      if (!maybeMissingColumn) break;
     }
 
-    if (error) {
-      console.error("[Auth] Profile fetch failed", { userId, error: error.message });
+    if (lastError) {
+      console.error("[Auth] Profile fetch failed", { userId, error: lastError.message });
       return null;
     }
-    console.log(data ? "[Auth] Profile found" : "[Auth] Profile not found", { userId });
     if (!data) return null;
     return normalizeProfileRow(data as ProfileRow);
   }, []);
@@ -309,10 +286,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const applySession = useCallback(
     async (nextSession: Session | null) => {
-      console.log("[Auth] Auth session detected", {
-        hasSession: Boolean(nextSession),
-        userId: nextSession?.user?.id,
-      });
       setSession(nextSession);
       setUser(nextSession?.user ?? null);
       setProfileError(null);
@@ -370,7 +343,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setProfileError(null);
     try {
       const { data } = await supabase.auth.getSession();
-      console.log("[Auth] getSession completed (retry)");
       await applySession(data.session);
     } catch (err) {
       console.error("[Auth] retry bootstrap failed", err);
@@ -404,7 +376,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setProfileError(null);
       try {
         const { data } = await supabase.auth.getSession();
-        console.log("[Auth] getSession completed (bootstrap)");
         if (!cancelled) await applySession(data.session);
       } catch (err) {
         console.error("[Auth] initial bootstrap failed", err);
@@ -423,8 +394,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     void bootstrap();
 
-    const { data: listener } = supabase.auth.onAuthStateChange((event, nextSession) => {
-      console.log("Auth state changed:", event, nextSession);
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, nextSession) => {
       if (cancelled) return;
       void applySession(nextSession).catch((err) => {
         console.error("[Auth] onAuthStateChange applySession failed", err);
@@ -502,13 +472,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             isAdmin,
           });
         } catch (err) {
-          console.log("[Auth] ensureProfile during signup failed", err);
+          console.error("[Auth] ensureProfile during signup failed", err);
           return "Signed up, but profile creation failed (likely RLS). Confirm email/login again, or fix Profiles RLS.";
         }
 
         return null;
       } catch (err) {
-        console.log("[Auth] signUp crashed", err);
+        console.error("[Auth] signUp crashed", err);
         return "Signup failed due to a network or unexpected error. Please try again.";
       }
     },

@@ -19,8 +19,6 @@ if (
 }
 
 function createBrowserSupabaseClient() {
-  console.log("Supabase URL:", import.meta.env.VITE_SUPABASE_URL);
-  console.log("Supabase Key:", import.meta.env.VITE_SUPABASE_ANON_KEY);
   return createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, {
     auth: {
       persistSession: true,
@@ -51,4 +49,8 @@ export type ProfileRow = {
    * Empty/missing = include all asset types.
    */
   assets_total_exclude_type_id?: string;
+  /** Calendar day 1–31 for financial review reminder; null/omit = off. */
+  review_day?: number | null;
+  /** Budgets / deleted-builtin prefs synced from the client (jsonb). */
+  app_state?: Record<string, unknown> | null;
 };

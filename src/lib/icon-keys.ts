@@ -36,6 +36,8 @@ const CATEGORY_KEYS = new Set([
   "dumbbell",
   "laptop",
   "tag",
+  "piggy-bank",
+  "trending-up",
 ]);
 
 function looksLikeEmoji(s: string): boolean {

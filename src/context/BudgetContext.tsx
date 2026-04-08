@@ -2,11 +2,20 @@ import {
   createContext,
   useCallback,
   useContext,
+  useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
+import { useAuth } from "@/context/AuthContext";
 import { DEFAULT_CATEGORY_BUDGETS } from "@/data/mock";
+import {
+  APP_STATE_KEYS,
+  fetchProfileAppState,
+  patchProfileAppState,
+} from "@/lib/householdAppState";
+import { isValidHouseholdCode, normalizeHouseholdCode } from "@/lib/household";
 import { formatYearMonth, type YearMonth } from "@/lib/month";
 
 type BudgetContextValue = {
@@ -35,7 +44,12 @@ const BudgetContext = createContext<BudgetContextValue | null>(null);
 export const BUDGET_MONTHLY_TOTAL_KEY = "__monthly_total__";
 export const BUDGET_DEFAULT_TEMPLATE_KEY = "__default_budget__";
 
-const STORAGE_KEY = "expandy-budgets-by-month-v1";
+export const BUDGET_LOCAL_STORAGE_KEY = "expandy-budgets-by-month-v1";
+const LEGACY_BUDGET_STORAGE_KEY = BUDGET_LOCAL_STORAGE_KEY;
+
+function scopedBudgetStorageKey(householdId: string): string {
+  return `${LEGACY_BUDGET_STORAGE_KEY}__${householdId}`;
+}
 
 type BudgetsByMonth = Record<string, Record<string, number>>;
 
@@ -91,17 +105,42 @@ export function resolveMonthBudgetsFrom(
 
 function readStoredBudgetsByMonth(): BudgetsByMonth {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = localStorage.getItem(LEGACY_BUDGET_STORAGE_KEY);
     if (!raw) return {};
     const parsed = JSON.parse(raw) as BudgetsByMonth;
-    if (!parsed || typeof parsed !== "object") return {};
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
     return parsed;
   } catch {
     return {};
   }
 }
 
+/** Per-household local cache; falls back to legacy key for migration. */
+function readStoredBudgetsForHousehold(householdId: string): BudgetsByMonth {
+  if (!isValidHouseholdCode(householdId)) return readStoredBudgetsByMonth();
+  try {
+    const scopedRaw = localStorage.getItem(scopedBudgetStorageKey(householdId));
+    if (scopedRaw) {
+      const scoped = JSON.parse(scopedRaw) as BudgetsByMonth;
+      if (scoped && typeof scoped === "object" && !Array.isArray(scoped)) return scoped;
+    }
+  } catch {
+    /* ignore */
+  }
+  return readStoredBudgetsByMonth();
+}
+
 export function BudgetProvider({ children }: { children: ReactNode }) {
+  const { profile, user, loading: authLoading } = useAuth();
+  const householdId = normalizeHouseholdCode(profile?.household_id ?? "");
+  const householdIdRef = useRef(householdId);
+  householdIdRef.current = householdId;
+  const userIdRef = useRef(user?.id ?? "");
+  userIdRef.current = user?.id ?? "";
+
+  const applyingRemoteRef = useRef(false);
+  const cloudSaveTimerRef = useRef<number | null>(null);
+
   const [budgetsByMonth, setBudgetsByMonth] = useState<BudgetsByMonth>(() =>
     readStoredBudgetsByMonth(),
   );
@@ -118,13 +157,85 @@ export function BudgetProvider({ children }: { children: ReactNode }) {
     [resolveMonthBudgets, activeMonth],
   );
 
-  const persistBudgets = useCallback((next: BudgetsByMonth) => {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
-    } catch {
-      /* ignore */
-    }
+  const scheduleCloudPersist = useCallback((next: BudgetsByMonth) => {
+    if (applyingRemoteRef.current) return;
+    const uid = userIdRef.current;
+    if (!uid) return;
+    const hm = householdIdRef.current;
+    if (!isValidHouseholdCode(hm)) return;
+    if (cloudSaveTimerRef.current != null) window.clearTimeout(cloudSaveTimerRef.current);
+    cloudSaveTimerRef.current = window.setTimeout(() => {
+      cloudSaveTimerRef.current = null;
+      void patchProfileAppState(uid, {
+        [APP_STATE_KEYS.budgetsByMonth]: next,
+      });
+    }, 450);
   }, []);
+
+  const persistBudgets = useCallback(
+    (next: BudgetsByMonth) => {
+      try {
+        const hm = householdIdRef.current;
+        const key = isValidHouseholdCode(hm)
+          ? scopedBudgetStorageKey(hm)
+          : LEGACY_BUDGET_STORAGE_KEY;
+        localStorage.setItem(key, JSON.stringify(next));
+      } catch {
+        /* ignore */
+      }
+      scheduleCloudPersist(next);
+    },
+    [scheduleCloudPersist],
+  );
+
+  useEffect(() => {
+    return () => {
+      if (cloudSaveTimerRef.current != null) window.clearTimeout(cloudSaveTimerRef.current);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (authLoading || !user?.id || !isValidHouseholdCode(householdId)) return;
+    let cancelled = false;
+    const localFirst = readStoredBudgetsForHousehold(householdId);
+    applyingRemoteRef.current = true;
+    setBudgetsByMonth(localFirst);
+    applyingRemoteRef.current = false;
+    void (async () => {
+      const app = await fetchProfileAppState(user.id);
+      if (cancelled) return;
+      const remote = app[APP_STATE_KEYS.budgetsByMonth];
+      const local = readStoredBudgetsForHousehold(householdId);
+      const remoteOk =
+        remote != null &&
+        typeof remote === "object" &&
+        !Array.isArray(remote) &&
+        Object.keys(remote as object).length > 0;
+
+      applyingRemoteRef.current = true;
+      if (remoteOk) {
+        const merged = remote as BudgetsByMonth;
+        setBudgetsByMonth(merged);
+        try {
+          const key = scopedBudgetStorageKey(householdId);
+          localStorage.setItem(key, JSON.stringify(merged));
+        } catch {
+          /* ignore */
+        }
+      } else {
+        setBudgetsByMonth(local);
+        if (Object.keys(local).length > 0) {
+          void patchProfileAppState(user.id, {
+            [APP_STATE_KEYS.budgetsByMonth]: local,
+          });
+        }
+      }
+      applyingRemoteRef.current = false;
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [authLoading, householdId, user?.id]);
 
   const getBudget = useCallback(
     (categoryId: string, ym?: YearMonth) => {
@@ -241,9 +352,17 @@ export function BudgetProvider({ children }: { children: ReactNode }) {
   const clearAllUserData = useCallback(() => {
     setBudgetsByMonth({});
     try {
-      localStorage.removeItem(STORAGE_KEY);
+      localStorage.removeItem(LEGACY_BUDGET_STORAGE_KEY);
+      const hm = householdIdRef.current;
+      if (isValidHouseholdCode(hm)) {
+        localStorage.removeItem(scopedBudgetStorageKey(hm));
+      }
     } catch {
       /* ignore */
+    }
+    const uid = userIdRef.current;
+    if (uid) {
+      void patchProfileAppState(uid, { [APP_STATE_KEYS.budgetsByMonth]: {} });
     }
   }, []);
 

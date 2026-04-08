@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import {
   BarChart3,
   PieChart as PieChartIcon,
@@ -36,6 +36,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { MonthlySurplusInsights } from "@/components/dashboard/MonthlySurplusInsights";
 import { CategoryGlyph } from "@/components/expense/FinanceGlyphs";
 import { ColorBadge } from "@/components/expense/ColorBadge";
 import { useBudgets } from "@/context/BudgetContext";
@@ -65,6 +66,7 @@ import {
   type YearMonth,
 } from "@/lib/month";
 import { parseProjectedRecurringId } from "@/lib/expenseIds";
+import { mergeProjectedRecurringExpenses } from "@/lib/recurringProjection";
 import { cn } from "@/lib/utils";
 
 type ChartMode = "bars" | "pie";
@@ -112,8 +114,7 @@ export function DashboardView({
   const { getBudget, getMonthlyBudgetTotal, budgets } = useBudgets();
   const {
     expenses,
-    expensesForMonth,
-    materializeRecurringForMonth,
+    recurringIncomeSkips,
     expenseCategories,
     incomeSources,
     destinationAccounts,
@@ -147,13 +148,68 @@ export function DashboardView({
     });
   }, []);
 
-  const filteredExpenses = useMemo(() => {
-    if (timeframeMode === "all") return expenses;
+  /** Same recurring projection as History — synchronous, no useEffect race. */
+  const expensesIncludingProjectedRecurring = useMemo(() => {
     if (timeframeMode === "year") {
-      return expenses.filter((e) => e.date.startsWith(`${selectedYear}-`));
+      const months = Array.from(
+        { length: 12 },
+        (_, i) => `${selectedYear}-${String(i + 1).padStart(2, "0")}`,
+      );
+      return mergeProjectedRecurringExpenses(expenses, recurringIncomeSkips, {
+        mode: "explicitMonths",
+        months,
+        viewAnchorYm: `${selectedYear}-01`,
+        capHorizonFromAnchor: false,
+      });
     }
-    return selectedMonth === ALL_TIME ? expenses : expensesForMonth(selectedMonth);
-  }, [ALL_TIME, expenses, expensesForMonth, selectedMonth, timeframeMode, selectedYear]);
+    if (timeframeMode === "all") {
+      return mergeProjectedRecurringExpenses(expenses, recurringIncomeSkips, {
+        mode: "monthsFromData",
+        viewAnchorYm: formatYearMonth(new Date()),
+        capHorizonFromAnchor: true,
+      });
+    }
+    if (selectedMonth === ALL_TIME) {
+      return mergeProjectedRecurringExpenses(expenses, recurringIncomeSkips, {
+        mode: "monthsFromData",
+        viewAnchorYm: formatYearMonth(new Date()),
+        capHorizonFromAnchor: true,
+      });
+    }
+    return mergeProjectedRecurringExpenses(expenses, recurringIncomeSkips, {
+      mode: "explicitMonths",
+      months: [selectedMonth],
+      viewAnchorYm: selectedMonth,
+      capHorizonFromAnchor: false,
+    });
+  }, [
+    ALL_TIME,
+    expenses,
+    recurringIncomeSkips,
+    selectedMonth,
+    selectedYear,
+    timeframeMode,
+  ]);
+
+  const filteredExpenses = useMemo(() => {
+    if (timeframeMode === "all") return expensesIncludingProjectedRecurring;
+    if (timeframeMode === "year") {
+      return expensesIncludingProjectedRecurring.filter((e) =>
+        e.date.startsWith(`${selectedYear}-`),
+      );
+    }
+    return selectedMonth === ALL_TIME
+      ? expensesIncludingProjectedRecurring
+      : expensesIncludingProjectedRecurring.filter((e) =>
+          e.date.startsWith(selectedMonth),
+        );
+  }, [
+    ALL_TIME,
+    expensesIncludingProjectedRecurring,
+    selectedMonth,
+    selectedYear,
+    timeframeMode,
+  ]);
 
   const budgetScaleMonths = useMemo(() => {
     if (timeframeMode === "year") return 12;
@@ -162,13 +218,6 @@ export function DashboardView({
     }
     return 1;
   }, [timeframeMode, filteredExpenses]);
-
-  // Ensure recurring templates are instantiated for the viewed month.
-  useEffect(() => {
-    if (timeframeMode === "month" && selectedMonth !== ALL_TIME) {
-      materializeRecurringForMonth(selectedMonth);
-    }
-  }, [materializeRecurringForMonth, selectedMonth, ALL_TIME, timeframeMode]);
   const expensesOnly = useMemo(
     () => filteredExpenses.filter((e) => e.type === "expense"),
     [filteredExpenses],
@@ -358,20 +407,28 @@ export function DashboardView({
   );
 
   const trendData = useMemo(() => {
-    return lastNYearMonths(6).map((ym) => ({
+    const trendMonths = lastNYearMonths(6);
+    const withProjected = mergeProjectedRecurringExpenses(expenses, recurringIncomeSkips, {
+      mode: "explicitMonths",
+      months: trendMonths,
+      viewAnchorYm: formatYearMonth(new Date()),
+      capHorizonFromAnchor: false,
+    });
+    return trendMonths.map((ym) => ({
       ym,
       label: monthYearShort(ym),
-      expense: expenses
+      expense: withProjected
         .filter((e) => e.date.startsWith(ym) && e.type === "expense")
         .reduce((s, e) => s + convertToILS(e.amount, e.currency, e.date), 0),
-      income: expenses
+      income: withProjected
         .filter((e) => e.date.startsWith(ym) && e.type === "income")
         .reduce((s, e) => s + convertToILS(e.amount, e.currency, e.date), 0),
     }));
-  }, [expenses, fxTick]);
+  }, [expenses, recurringIncomeSkips, fxTick]);
 
   return (
     <div className="flex flex-col gap-4" dir={dir}>
+      <MonthlySurplusInsights />
       <Card className="border-border/80 shadow-none">
         <CardHeader className="flex flex-row items-start gap-3 space-y-0 pb-2">
           <div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-secondary">
@@ -435,17 +492,6 @@ export function DashboardView({
             </div>
           </div>
 
-          <div>
-            <p className="text-base leading-relaxed text-muted-foreground">
-              {selectedMonth === ALL_TIME
-                ? t.exportAllTime
-                : `${t.thisMonthTotal} · ${hebrewMonthYearLabel(selectedMonth)}`}
-            </p>
-            <p className="mt-1 text-3xl font-semibold tabular-nums tracking-tight">
-              {formatIls(total)}
-            </p>
-          </div>
-
           <div className="grid grid-cols-3 gap-2">
             <FinanceStat label={t.summaryIncome} value={financeSummary.income} />
             <FinanceStat label={t.summaryExpense} value={financeSummary.expense} />
@@ -500,10 +546,15 @@ export function DashboardView({
                       ? `נותר ${formatIls(monthlyBudgetRemaining)}`
                       : `${formatIls(monthlyBudgetRemaining)} remaining`}
                 </p>
-                <p className="text-xs tabular-nums leading-relaxed text-muted-foreground">
-                  {lang === "he"
-                    ? `${formatIls(financeSummary.expense)} / ${formatIls(effectiveMonthlyBudgetTotal)}`
-                    : `${formatIls(financeSummary.expense)} / ${formatIls(effectiveMonthlyBudgetTotal)}`}
+                <p
+                  className={cn(
+                    "w-full text-xs tabular-nums leading-relaxed text-muted-foreground",
+                    dir === "rtl" ? "text-right" : "text-left",
+                  )}
+                  dir="ltr"
+                >
+                  {formatIls(financeSummary.expense)} /{" "}
+                  {formatIls(effectiveMonthlyBudgetTotal)}
                 </p>
               </>
             ) : (

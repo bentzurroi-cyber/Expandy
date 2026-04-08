@@ -12,6 +12,13 @@ export function parseYearMonth(key: YearMonth): { y: number; m: number } {
   return { y: Number(ys), m: Number(ms) };
 }
 
+/** Previous calendar month (e.g. 2026-03 → 2026-02). */
+export function previousYearMonth(ym: YearMonth): YearMonth {
+  const { y, m } = parseYearMonth(ym);
+  const d = new Date(y, m - 2, 1);
+  return formatYearMonth(d);
+}
+
 /** תווית עברית לחודש, למשל "מרץ 2026" */
 export function hebrewMonthYearLabel(key: YearMonth): string {
   const { y, m } = parseYearMonth(key);
@@ -47,6 +54,17 @@ export function formatLocalIsoDate(d: Date): string {
   const m = String(d.getMonth() + 1).padStart(2, "0");
   const day = String(d.getDate()).padStart(2, "0");
   return `${y}-${m}-${day}`;
+}
+
+/**
+ * Today's calendar day projected into `ym`, clamped to that month's length.
+ * Keeps month-close ledger lines in the **closed** month (reviewMonth), not the current calendar month.
+ */
+export function isoDateInYearMonth(ym: YearMonth, ref: Date = new Date()): string {
+  const { y, m } = parseYearMonth(ym);
+  const lastDay = new Date(y, m, 0).getDate();
+  const day = Math.min(ref.getDate(), lastDay);
+  return `${ym}-${String(day).padStart(2, "0")}`;
 }
 
 /** YYYY-MM-DD מקומי — לבחירת תאריך בלוח שנה */

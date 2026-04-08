@@ -16,6 +16,7 @@ import {
   type AssetSnapshot,
 } from "@/data/mock";
 import { formatYearMonth, type YearMonth } from "@/lib/month";
+import { assetBaseId, ymFromAssetRowId } from "@/lib/assetRowId";
 import { pickDistinctImportCategoryColor } from "@/lib/categoryColors";
 import { useAuth } from "@/context/AuthContext";
 import { supabase } from "@/lib/supabase";
@@ -36,13 +37,42 @@ type AssetsContextValue = {
   currentMonth: YearMonth;
   setCurrentMonth: (ym: YearMonth) => void;
   currentAssets: AssetAccount[];
-  setBalance: (id: string, balance: number) => void;
-  setAccountCurrency: (id: string, currency: string) => void;
+  /**
+   * `balanceDate` + `snapshotYm` (חודש שורת ה-DB). אם החודש משתנה — מעביר את הנכס בין סנאפשוטים מקומית
+   * ומוחק את שורת החודש הישן ב-Supabase לפני upsert.
+   */
+  setBalance: (id: string, balance: number, balanceDate?: string, snapshotYm?: YearMonth) => void;
+  setAccountCurrency: (id: string, currency: string, snapshotYm?: YearMonth) => void;
+  /**
+   * Write one account to a specific calendar month (ignores Assets screen month picker).
+   * Awaits Supabase upsert. `balanceDate` (YYYY-MM-DD) sets `assets.date` when provided.
+   */
+  persistAssetRowForMonth: (input: {
+    baseId: string;
+    ym: YearMonth;
+    balance: number;
+    name: string;
+    type: string;
+    currency: string;
+    color?: string;
+    balanceDate?: string;
+  }) => Promise<{ ok: true } | { ok: false; error: string }>;
   updateAccountMeta: (id: string, patch: { name?: string }) => void;
+  /** Updates `type` on all rows for this logical asset (does not change balances). */
+  updateAccountAssetKind: (id: string, newType: string) => Promise<void>;
+  /** Deletes every DB row for this logical asset (all months). */
   deleteAccount: (id: string) => void;
+  /** Deletes only rows belonging to `ym`; other months stay in DB and in history. */
+  removeAccountFromMonth: (
+    accountId: string,
+    ym: YearMonth,
+  ) => Promise<{ ok: true } | { ok: false; error: string }>;
+  /** True if any stored row for this base id is dated / keyed to a month other than `ym`. */
+  getAssetHasRowsOutsideMonth: (accountId: string, ym: YearMonth) => Promise<boolean>;
   addSnapshotAccount: (
     ym: YearMonth,
     input: Omit<AssetAccount, "id">,
+    opts?: { balanceDate?: string },
   ) => Promise<{ ok: true } | { ok: false; error: string }>;
   /** Batch insert asset snapshot rows for given months; persists to Supabase. */
   bulkImportAssets: (
@@ -91,14 +121,7 @@ function normalizeTypeId(name: string): string {
   return base || `asset-type-${Date.now().toString(36)}`;
 }
 
-/** DB row id suffix: one row per (logical asset, month), matching migration `id__YYYY-MM`. */
-function assetBaseId(rowId: string): string {
-  const m = /^(.+)__(\d{4}-\d{2})$/.exec(rowId);
-  return m ? m[1]! : rowId;
-}
-
 function rowIdForMonth(accountId: string, ym: YearMonth): string {
-  if (/__\d{4}-\d{2}$/.test(accountId)) return accountId;
   return `${assetBaseId(accountId)}__${ym}`;
 }
 
@@ -109,8 +132,42 @@ function findAccountInSnapshot(
 ): AssetAccount | undefined {
   const s = snaps.find((x) => x.ym === ym);
   if (!s) return undefined;
+  const base = assetBaseId(rawId);
   const want = rowIdForMonth(rawId, ym);
-  return s.accounts.find((a) => a.id === rawId || a.id === want);
+  return s.accounts.find(
+    (a) => a.id === rawId || a.id === want || assetBaseId(a.id) === base,
+  );
+}
+
+function findAccountAcrossSnapshots(
+  snaps: AssetSnapshot[],
+  rawId: string,
+): AssetAccount | undefined {
+  const base = assetBaseId(rawId);
+  for (const s of snaps) {
+    const hit = s.accounts.find(
+      (a) => assetBaseId(a.id) === base || a.id === rawId,
+    );
+    if (hit) return { ...hit };
+  }
+  return undefined;
+}
+
+/** חודש הסנאפשוט שבו מופיע הנכס לפני עדכון — לזיהוי שורת DB למחיקה במעבר חודש */
+function findSnapshotYmForBase(snaps: AssetSnapshot[], base: string): YearMonth | null {
+  for (const s of snaps) {
+    if (s.accounts.some((a) => assetBaseId(a.id) === base)) return s.ym;
+  }
+  return null;
+}
+
+async function deleteAssetRowsByIds(ctx: PersistCtx, ids: Iterable<string>) {
+  const hm = ctx.householdId;
+  for (const delId of ids) {
+    const id = delId.trim();
+    if (!id) continue;
+    await supabase.from("assets").delete().eq("id", id).eq("household_id", hm);
+  }
 }
 
 const DEFAULT_ASSET_TYPES: AssetTypeOption[] = [
@@ -138,11 +195,16 @@ async function upsertAssetRow(
   ctx: PersistCtx | null,
   ym: YearMonth,
   acc: AssetAccount,
+  rowDate?: string,
 ): Promise<{ error: string } | null> {
   if (!ctx || !isValidHouseholdCode(ctx.householdId)) {
     return { error: "Missing household_id. Cannot save data." };
   }
   const rowId = rowIdForMonth(acc.id, ym);
+  const dateStr =
+    typeof rowDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(rowDate.trim())
+      ? rowDate.trim()
+      : `${ym}-01`;
   const row = {
     id: rowId,
     user_id: ctx.userId,
@@ -150,7 +212,7 @@ async function upsertAssetRow(
     name: acc.name,
     type: acc.type,
     balance: acc.balance,
-    date: `${ym}-01`,
+    date: dateStr,
     color: null,
     currency: acc.currency ?? "ILS",
   };
@@ -178,6 +240,34 @@ async function deleteAssetRowsFromDb(ctx: PersistCtx | null, accountId: string) 
     .like("id", `${base}__%`);
 }
 
+/** Remove DB rows for `base` that belong only to calendar month `ym` (by `date` or id suffix). */
+async function deleteAssetRowsForMonthOnly(
+  ctx: PersistCtx,
+  rawBaseInput: string,
+  ym: YearMonth,
+): Promise<{ error?: string }> {
+  const hm = ctx.householdId;
+  const base = assetBaseId(rawBaseInput);
+  const { data, error: selErr } = await supabase
+    .from("assets")
+    .select("id, date")
+    .eq("household_id", hm)
+    .or(`id.eq.${base},id.like.${base}__%`);
+  if (selErr) return { error: selErr.message };
+  for (const row of data ?? []) {
+    const id = String((row as { id?: string }).id ?? "");
+    if (!id) continue;
+    const dateYm = String((row as { date?: string }).date ?? "").slice(0, 7);
+    let rowYm: YearMonth | null = null;
+    if (/^\d{4}-\d{2}$/.test(dateYm)) rowYm = dateYm as YearMonth;
+    if (!rowYm) rowYm = ymFromAssetRowId(id);
+    if (rowYm !== ym) continue;
+    const { error: delErr } = await supabase.from("assets").delete().eq("id", id).eq("household_id", hm);
+    if (delErr) return { error: delErr.message };
+  }
+  return {};
+}
+
 async function updateAssetMetaInDb(
   ctx: PersistCtx | null,
   accountId: string,
@@ -190,16 +280,14 @@ async function updateAssetMetaInDb(
     .select("id")
     .eq("household_id", ctx.householdId)
     .or(`id.eq.${base},id.like.${base}__%`);
-  if (selErr) {
-    return;
-  }
+  if (selErr) return;
   const updates: Record<string, string | null> = {};
   if (typeof patch.name === "string") updates.name = patch.name.trim();
   if (!Object.keys(updates).length) return;
   for (const r of data ?? []) {
-    const id = String((r as { id?: string }).id ?? "");
-    if (!id) continue;
-    await supabase.from("assets").update(updates).eq("id", id);
+    const rid = String((r as { id?: string }).id ?? "");
+    if (!rid) continue;
+    await supabase.from("assets").update(updates).eq("id", rid);
   }
 }
 
@@ -215,13 +303,11 @@ async function updateAssetTypeInDb(
     .select("id")
     .eq("household_id", ctx.householdId)
     .or(`id.eq.${base},id.like.${base}__%`);
-  if (selErr) {
-    return;
-  }
+  if (selErr) return;
   for (const r of data ?? []) {
-    const id = String((r as { id?: string }).id ?? "");
-    if (!id) continue;
-    await supabase.from("assets").update({ type: newType }).eq("id", id);
+    const rid = String((r as { id?: string }).id ?? "");
+    if (!rid) continue;
+    await supabase.from("assets").update({ type: newType }).eq("id", rid);
   }
 }
 
@@ -268,6 +354,8 @@ export function AssetsProvider({ children }: { children: ReactNode }) {
         const rawDate = String(row.date ?? "");
         const ym = rawDate.slice(0, 7);
         if (!/^\d{4}-\d{2}$/.test(ym)) continue;
+        const dateIso =
+          /^\d{4}-\d{2}-\d{2}$/.test(rawDate.slice(0, 10)) ? rawDate.slice(0, 10) : undefined;
         const next: AssetAccount = {
           id: String(row.id ?? ""),
           name: String(row.name ?? ""),
@@ -275,6 +363,7 @@ export function AssetsProvider({ children }: { children: ReactNode }) {
           balance: Number(row.balance ?? 0),
           color: typeof row.color === "string" ? row.color : undefined,
           currency: typeof row.currency === "string" ? row.currency : "ILS",
+          ...(dateIso ? { balanceDate: dateIso } : {}),
         };
         const bucket = byYm.get(ym) ?? [];
         bucket.push(next);
@@ -386,13 +475,16 @@ export function AssetsProvider({ children }: { children: ReactNode }) {
       if (!target) return;
 
       const prevSnaps = snapshotsRef.current;
-      for (const s of prevSnaps) {
-        for (const a of s.accounts) {
-          if (a.type === id) {
-            void updateAssetTypeInDb(persistCtx, a.id, target);
+      void (async () => {
+        for (const s of prevSnaps) {
+          for (const a of s.accounts) {
+            if (a.type === id) {
+              await updateAssetTypeInDb(persistCtx, a.id, target);
+            }
           }
         }
-      }
+        await loadAssetsFromSupabase();
+      })();
 
       setSnapshots((prev) =>
         prev.map((s) => ({
@@ -415,7 +507,7 @@ export function AssetsProvider({ children }: { children: ReactNode }) {
 
       setAssetTypes((prev) => prev.filter((t) => t.id !== id));
     },
-    [persistCtx],
+    [persistCtx, loadAssetsFromSupabase],
   );
 
   const assetNamePresetsFor = useCallback(
@@ -432,70 +524,217 @@ export function AssetsProvider({ children }: { children: ReactNode }) {
   }, [snapshots, currentMonth]);
 
   const setBalance = useCallback(
-    (id: string, balance: number) => {
-      const nextBal = Math.max(0, Math.round(balance));
-      const want = rowIdForMonth(id, currentMonth);
+    (id: string, balance: number, balanceDate?: string, snapshotYm?: YearMonth) => {
+      const ym = snapshotYm ?? currentMonth;
+      const nextBal = Math.max(0, Math.round(balance * 100) / 100);
+      const dateStr =
+        typeof balanceDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(balanceDate.trim())
+          ? balanceDate.trim()
+          : undefined;
+
       setSnapshots((prev) => {
-        const idx = prev.findIndex((s) => s.ym === currentMonth);
-        let next: AssetSnapshot[];
+        let source = findAccountAcrossSnapshots(prev, id);
+        if (!source) {
+          const want = rowIdForMonth(id, ym);
+          const fromCurrent = currentAssets.find(
+            (a) => a.id === id || rowIdForMonth(a.id, ym) === want,
+          );
+          if (!fromCurrent) return prev;
+          source = { ...fromCurrent };
+        }
+
+        const base = assetBaseId(source.id);
+        const oldYm = ymFromAssetRowId(source.id);
+        const sourceSnapshotYm = findSnapshotYmForBase(prev, base);
+        const rowD =
+          dateStr ??
+          (source.balanceDate && /^\d{4}-\d{2}-\d{2}$/.test(source.balanceDate)
+            ? source.balanceDate
+            : `${ym}-01`);
+
+        const nextAcc: AssetAccount = {
+          ...source,
+          id: rowIdForMonth(base, ym),
+          balance: nextBal,
+          balanceDate: rowD,
+        };
+        const newRowId = nextAcc.id;
+
+        let next = prev.map((s) => ({
+          ...s,
+          accounts: s.accounts.filter((a) => assetBaseId(a.id) !== base),
+        }));
+
+        const idx = next.findIndex((s) => s.ym === ym);
         if (idx === -1) {
-          const updated = [...currentAssets].map((a) => {
-            const rid = rowIdForMonth(a.id, currentMonth);
-            return rid === want || a.id === id ? { ...a, balance: nextBal } : a;
-          });
-          next = [...prev, { ym: currentMonth, accounts: updated }];
+          next = [...next, { ym, accounts: [nextAcc] }].sort((a, b) => a.ym.localeCompare(b.ym));
         } else {
-          next = prev.map((s, i) =>
-            i === idx
-              ? {
-                  ...s,
-                  accounts: s.accounts.map((a) => {
-                    const rid = rowIdForMonth(a.id, currentMonth);
-                    return rid === want || a.id === id ? { ...a, balance: nextBal } : a;
-                  }),
-                }
-              : s,
+          next = next.map((s, i) =>
+            i === idx ? { ...s, accounts: [...s.accounts, nextAcc] } : s,
           );
         }
-        const acc = findAccountInSnapshot(next, currentMonth, id);
-        if (acc) void upsertAssetRow(persistCtx, currentMonth, acc);
+
+        void (async () => {
+          if (!persistCtx || !isValidHouseholdCode(persistCtx.householdId)) return;
+          const ctx = persistCtx;
+          const idsToDelete = new Set<string>();
+          if (sourceSnapshotYm && sourceSnapshotYm !== ym) {
+            idsToDelete.add(rowIdForMonth(base, sourceSnapshotYm));
+          }
+          if (oldYm && oldYm !== ym) {
+            idsToDelete.add(rowIdForMonth(base, oldYm));
+          }
+          if (source.id !== newRowId) {
+            idsToDelete.add(source.id);
+          }
+          idsToDelete.delete(newRowId);
+          await deleteAssetRowsByIds(ctx, idsToDelete);
+          const err = await upsertAssetRow(ctx, ym, nextAcc, rowD);
+          if (!err) await loadAssetsFromSupabase();
+        })();
+
         return next;
       });
     },
-    [currentAssets, currentMonth, persistCtx],
+    [currentAssets, currentMonth, persistCtx, loadAssetsFromSupabase],
+  );
+
+  const persistAssetRowForMonth = useCallback(
+    async (input: {
+      baseId: string;
+      ym: YearMonth;
+      balance: number;
+      name: string;
+      type: string;
+      currency: string;
+      color?: string;
+      balanceDate?: string;
+    }): Promise<{ ok: true } | { ok: false; error: string }> => {
+      const { baseId, ym, balance, name, type, currency, color, balanceDate } = input;
+      const nextBal = Math.max(0, Math.round(balance * 100) / 100);
+      const want = rowIdForMonth(baseId, ym);
+      const bd =
+        typeof balanceDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(balanceDate.trim())
+          ? balanceDate.trim()
+          : undefined;
+
+      let savedOut: AssetAccount | null = null;
+      setSnapshots((prev) => {
+        const idx = prev.findIndex((s) => s.ym === ym);
+
+        const upsertIntoAccounts = (accs: AssetAccount[]): AssetAccount[] => {
+          const matchIx = accs.findIndex(
+            (a) =>
+              assetBaseId(a.id) === assetBaseId(baseId) ||
+              a.id === baseId ||
+              rowIdForMonth(a.id, ym) === want,
+          );
+          if (matchIx >= 0) {
+            return accs.map((a, i) =>
+              i === matchIx
+                ? {
+                    ...a,
+                    id: assetBaseId(baseId),
+                    name,
+                    type,
+                    currency,
+                    color: color ?? a.color,
+                    balance: nextBal,
+                    ...(bd ? { balanceDate: bd } : {}),
+                  }
+                : a,
+            );
+          }
+          return [
+            ...accs,
+            {
+              id: baseId,
+              name,
+              type,
+              balance: nextBal,
+              currency,
+              color,
+              ...(bd ? { balanceDate: bd } : {}),
+            },
+          ];
+        };
+
+        let next: AssetSnapshot[];
+        if (idx === -1) {
+          const sorted = [...prev].sort((a, b) => b.ym.localeCompare(a.ym));
+          const seed = sorted[0]?.accounts ?? [];
+          const seeded = seed.map((a) => ({ ...a, id: assetBaseId(a.id) }));
+          const merged = upsertIntoAccounts(seeded);
+          next = [...prev, { ym, accounts: merged }];
+        } else {
+          next = prev.map((s, i) =>
+            i === idx ? { ...s, accounts: upsertIntoAccounts(s.accounts) } : s,
+          );
+        }
+
+        savedOut = findAccountInSnapshot(next, ym, baseId) ?? null;
+        return next;
+      });
+
+      if (!savedOut) {
+        savedOut = {
+          id: assetBaseId(baseId),
+          name,
+          type,
+          balance: nextBal,
+          currency,
+          ...(typeof color === "string" && color.trim() ? { color } : {}),
+          ...(bd ? { balanceDate: bd } : {}),
+        };
+      }
+      if (!persistCtx || !isValidHouseholdCode(persistCtx.householdId)) {
+        return { ok: false as const, error: "Missing household_id. Cannot save data." };
+      }
+      const err = await upsertAssetRow(persistCtx, ym, savedOut, balanceDate);
+      if (!err) await loadAssetsFromSupabase();
+      return err ? { ok: false as const, error: err.error } : { ok: true as const };
+    },
+    [persistCtx, loadAssetsFromSupabase],
   );
 
   const setAccountCurrency = useCallback(
-    (id: string, currency: string) => {
-      const want = rowIdForMonth(id, currentMonth);
+    (id: string, currency: string, snapshotYm?: YearMonth) => {
+      const ym = snapshotYm ?? currentMonth;
       setSnapshots((prev) => {
-        const idx = prev.findIndex((s) => s.ym === currentMonth);
-        let next: AssetSnapshot[];
-        if (idx === -1) {
-          const updated = [...currentAssets].map((a) => {
-            const rid = rowIdForMonth(a.id, currentMonth);
-            return rid === want || a.id === id ? { ...a, currency } : a;
-          });
-          next = [...prev, { ym: currentMonth, accounts: updated }];
-        } else {
-          next = prev.map((s, i) =>
-            i === idx
-              ? {
-                  ...s,
-                  accounts: s.accounts.map((a) => {
-                    const rid = rowIdForMonth(a.id, currentMonth);
-                    return rid === want || a.id === id ? { ...a, currency } : a;
-                  }),
-                }
-              : s,
-          );
+        const idx = prev.findIndex((s) => s.ym === ym);
+        if (idx === -1) return prev;
+        const base = assetBaseId(id);
+        const want = rowIdForMonth(id, ym);
+        const next = prev.map((s, i) =>
+          i !== idx
+            ? s
+            : {
+                ...s,
+                accounts: s.accounts.map((a) => {
+                  const rid = rowIdForMonth(a.id, ym);
+                  const match =
+                    rid === want || a.id === id || assetBaseId(a.id) === base;
+                  return match ? { ...a, currency } : a;
+                }),
+              },
+        );
+        const acc =
+          findAccountInSnapshot(next, ym, id) ??
+          next[idx]?.accounts.find((a) => assetBaseId(a.id) === base);
+        if (acc) {
+          const rowD =
+            acc.balanceDate && /^\d{4}-\d{2}-\d{2}$/.test(acc.balanceDate)
+              ? acc.balanceDate
+              : `${ym}-01`;
+          void (async () => {
+            const err = await upsertAssetRow(persistCtx, ym, acc, rowD);
+            if (!err) await loadAssetsFromSupabase();
+          })();
         }
-        const acc = findAccountInSnapshot(next, currentMonth, id);
-        if (acc) void upsertAssetRow(persistCtx, currentMonth, acc);
         return next;
       });
     },
-    [currentAssets, currentMonth, persistCtx],
+    [currentMonth, persistCtx, loadAssetsFromSupabase],
   );
 
   const updateAccountMeta = useCallback(
@@ -514,14 +753,38 @@ export function AssetsProvider({ children }: { children: ReactNode }) {
           }),
         })),
       );
-      void updateAssetMetaInDb(persistCtx, id, { name: nextName });
+      void (async () => {
+        await updateAssetMetaInDb(persistCtx, id, { name: nextName });
+        await loadAssetsFromSupabase();
+      })();
     },
-    [persistCtx],
+    [persistCtx, loadAssetsFromSupabase],
+  );
+
+  const updateAccountAssetKind = useCallback(
+    async (id: string, newType: string) => {
+      const t = newType.trim();
+      if (!t) return;
+      setSnapshots((prev) =>
+        prev.map((s) => ({
+          ...s,
+          accounts: s.accounts.map((a) =>
+            assetBaseId(a.id) === assetBaseId(id) ? { ...a, type: t as AssetTypeId } : a,
+          ),
+        })),
+      );
+      await updateAssetTypeInDb(persistCtx, id, t);
+      await loadAssetsFromSupabase();
+    },
+    [persistCtx, loadAssetsFromSupabase],
   );
 
   const deleteAccount = useCallback(
     (id: string) => {
-      void deleteAssetRowsFromDb(persistCtx, id);
+      void (async () => {
+        await deleteAssetRowsFromDb(persistCtx, id);
+        await loadAssetsFromSupabase();
+      })();
       setSnapshots((prev) =>
         prev.map((s) => ({
           ...s,
@@ -533,7 +796,61 @@ export function AssetsProvider({ children }: { children: ReactNode }) {
       );
       setLabelPresets((prev) => prev.filter((p) => p.id !== id));
     },
+    [persistCtx, loadAssetsFromSupabase],
+  );
+
+  const getAssetHasRowsOutsideMonth = useCallback(
+    async (rawId: string, ym: YearMonth): Promise<boolean> => {
+      if (!persistCtx || !isValidHouseholdCode(persistCtx.householdId)) return false;
+      const base = assetBaseId(rawId);
+      const { data, error } = await supabase
+        .from("assets")
+        .select("id, date")
+        .eq("household_id", persistCtx.householdId)
+        .or(`id.eq.${base},id.like.${base}__%`);
+      if (error || !data?.length) return false;
+      const months = new Set<YearMonth>();
+      for (const row of data as { id?: string; date?: string }[]) {
+        const id = String(row.id ?? "");
+        const dateYm = String(row.date ?? "").slice(0, 7);
+        let m: YearMonth | null = null;
+        if (/^\d{4}-\d{2}$/.test(dateYm)) m = dateYm as YearMonth;
+        if (!m) m = ymFromAssetRowId(id);
+        if (m) months.add(m);
+      }
+      return [...months].some((m) => m !== ym);
+    },
     [persistCtx],
+  );
+
+  const removeAccountFromMonth = useCallback(
+    async (
+      rawId: string,
+      ym: YearMonth,
+    ): Promise<{ ok: true } | { ok: false; error: string }> => {
+      if (!persistCtx || !isValidHouseholdCode(persistCtx.householdId)) {
+        return { ok: false, error: "No household" };
+      }
+      const base = assetBaseId(rawId);
+      const res = await deleteAssetRowsForMonthOnly(persistCtx, base, ym);
+      if (res.error) {
+        toast.error(res.error);
+        return { ok: false, error: res.error };
+      }
+      setSnapshots((prev) =>
+        prev.map((s) =>
+          s.ym !== ym
+            ? s
+            : {
+                ...s,
+                accounts: s.accounts.filter((a) => assetBaseId(a.id) !== base),
+              },
+        ),
+      );
+      await loadAssetsFromSupabase();
+      return { ok: true };
+    },
+    [persistCtx, loadAssetsFromSupabase],
   );
 
   const clearAllUserData = useCallback(() => {
@@ -550,7 +867,11 @@ export function AssetsProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const addSnapshotAccount = useCallback(
-    async (ym: YearMonth, input: Omit<AssetAccount, "id">) => {
+    async (
+      ym: YearMonth,
+      input: Omit<AssetAccount, "id">,
+      opts?: { balanceDate?: string },
+    ) => {
       if (!persistCtx || !isValidHouseholdCode(persistCtx.householdId)) {
         return { ok: false as const, error: "אין חיבור לענן. נסה שוב בעוד רגע." };
       }
@@ -573,7 +894,11 @@ export function AssetsProvider({ children }: { children: ReactNode }) {
           i === idx ? { ...s, accounts: [...s.accounts, row] } : s,
         );
       });
-      const persistErr = await upsertAssetRow(persistCtx, ym, row);
+      const rowDate =
+        typeof opts?.balanceDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(opts.balanceDate.trim())
+          ? opts.balanceDate.trim()
+          : undefined;
+      const persistErr = await upsertAssetRow(persistCtx, ym, row, rowDate);
       if (persistErr) {
         setSnapshots((prev) =>
           prev.map((s) => ({
@@ -584,9 +909,10 @@ export function AssetsProvider({ children }: { children: ReactNode }) {
         return { ok: false as const, error: persistErr.error };
       }
       registerAssetName(row.type, row.name);
+      await loadAssetsFromSupabase();
       return { ok: true as const };
     },
-    [persistCtx, registerAssetName],
+    [persistCtx, registerAssetName, loadAssetsFromSupabase],
   );
 
   const bulkImportAssets = useCallback(
@@ -696,6 +1022,7 @@ export function AssetsProvider({ children }: { children: ReactNode }) {
         for (const { account } of inserts) {
           registerAssetName(account.type as AssetTypeId, account.name);
         }
+        await loadAssetsFromSupabase();
         return { ok: true as const, count: inserts.length };
       } catch (err) {
         return {
@@ -707,7 +1034,7 @@ export function AssetsProvider({ children }: { children: ReactNode }) {
         };
       }
     },
-    [persistCtx, registerAssetName, assetTypes],
+    [persistCtx, registerAssetName, assetTypes, loadAssetsFromSupabase],
   );
 
   const value = useMemo(
@@ -717,9 +1044,13 @@ export function AssetsProvider({ children }: { children: ReactNode }) {
       setCurrentMonth,
       currentAssets,
       setBalance,
+      persistAssetRowForMonth,
       setAccountCurrency,
       updateAccountMeta,
+      updateAccountAssetKind,
       deleteAccount,
+      removeAccountFromMonth,
+      getAssetHasRowsOutsideMonth,
       addSnapshotAccount,
       bulkImportAssets,
       assetTypes,
@@ -735,9 +1066,13 @@ export function AssetsProvider({ children }: { children: ReactNode }) {
       currentMonth,
       currentAssets,
       setBalance,
+      persistAssetRowForMonth,
       setAccountCurrency,
       updateAccountMeta,
+      updateAccountAssetKind,
       deleteAccount,
+      removeAccountFromMonth,
+      getAssetHasRowsOutsideMonth,
       addSnapshotAccount,
       bulkImportAssets,
       assetTypes,

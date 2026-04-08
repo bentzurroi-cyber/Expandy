@@ -26,6 +26,7 @@ import {
   Laptop,
   Music,
   PawPrint,
+  PiggyBank,
   Plane,
   Phone,
   Pill,
@@ -36,6 +37,7 @@ import {
   Stethoscope,
   Tag,
   Train,
+  TrendingUp,
   Tv,
   UtensilsCrossed,
   Wallet,
@@ -82,6 +84,8 @@ const CATEGORY_ICONS: Record<string, LucideIcon> = {
   dumbbell: Dumbbell,
   laptop: Laptop,
   tag: Tag,
+  "piggy-bank": PiggyBank,
+  "trending-up": TrendingUp,
 };
 
 const CURRENCY_ICONS: Record<string, LucideIcon> = {

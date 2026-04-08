@@ -38,8 +38,13 @@ import {
   dedupePaymentMethodsByName,
 } from "@/lib/dedupe";
 import { normalizeOptionName } from "@/lib/normalize";
-import { useBudgets } from "@/context/BudgetContext";
+import { BUDGET_LOCAL_STORAGE_KEY, useBudgets } from "@/context/BudgetContext";
 import { useAuth } from "@/context/AuthContext";
+import {
+  APP_STATE_KEYS,
+  fetchProfileAppState,
+  patchProfileAppState,
+} from "@/lib/householdAppState";
 import { supabase } from "@/lib/supabase";
 import {
   EXPANDY_APP_DATA_STORAGE_KEYS,
@@ -128,6 +133,22 @@ function readDeletedBuiltinIds(key: string): Set<string> {
   }
 }
 
+function deletedBuiltinListFromCloud(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((x): x is string => typeof x === "string");
+}
+
+function mergeDeletedBuiltinIdLists(cloud: unknown, local: Set<string>): string[] {
+  const fromCloud = deletedBuiltinListFromCloud(cloud);
+  return [...new Set([...fromCloud, ...local])];
+}
+
+function deletedBuiltinListsDiffer(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return true;
+  const bs = new Set(b);
+  return a.some((id) => !bs.has(id));
+}
+
 function readExpenseCategoryOrder(): string[] {
   try {
     const raw = localStorage.getItem(STORAGE_EXPENSE_CATEGORY_ORDER);
@@ -159,6 +180,12 @@ function isValidExpenseShape(row: unknown): row is Expense {
   if (
     typeof r.isVerified !== "undefined" &&
     typeof r.isVerified !== "boolean"
+  ) {
+    return false;
+  }
+  if (
+    typeof r.isReviewed !== "undefined" &&
+    typeof r.isReviewed !== "boolean"
   ) {
     return false;
   }
@@ -214,6 +241,7 @@ function readStoredExpenses(): Expense[] {
             : 1,
         recurringMonthly: r.recurringMonthly === true,
         ...(r.isVerified === true ? { isVerified: true } : {}),
+        ...(r.isReviewed === true ? { isReviewed: true } : {}),
         ...(Array.isArray(r.receiptUrls) && r.receiptUrls.length
           ? { receiptUrls: capReceiptUrls(r.receiptUrls as string[]) }
           : typeof (r as { receiptUrl?: unknown }).receiptUrl === "string" &&
@@ -415,6 +443,7 @@ function buildSupabaseExpenseUpdateBody(patch: ExpenseUpdatePatch): Record<strin
   if (patch.note !== undefined) body.note = patch.note;
   if (patch.currency !== undefined) body.currency = patch.currency;
   if (patch.isVerified !== undefined) body.is_verified = patch.isVerified === true;
+  if (patch.isReviewed !== undefined) body.is_reviewed = patch.isReviewed === true;
   if (patch.recurringMonthly !== undefined) {
     body.is_recurring = patch.recurringMonthly === true;
   }
@@ -453,6 +482,7 @@ type SupabaseExpenseRow = {
   note: string;
   currency: string;
   is_verified: boolean;
+  is_reviewed?: boolean;
   /** Canonical type on row; preferred over JSON when present. */
   entry_type?: string | null;
   payment_method_id?: string | null;
@@ -501,6 +531,7 @@ function mapDbExpenseToApp(row: SupabaseExpenseRow): Expense {
     installmentIndex: Math.max(1, Math.floor(row.installments_info?.installmentIndex ?? 1)),
     recurringMonthly: row.is_recurring === true,
     ...(row.is_verified ? { isVerified: true } : {}),
+    ...(row.is_reviewed ? { isReviewed: true } : {}),
     ...(receiptUrls?.length ? { receiptUrls } : {}),
   };
 }
@@ -522,7 +553,9 @@ type ExpensesContextValue = {
   expensesForMonth: (ym: `${number}-${number}`) => Expense[];
   /** Ensure recurring templates are instantiated into state for a month. */
   materializeRecurringForMonth: (ym: `${number}-${number}`) => void;
-  addExpense: (input: AddExpenseInput) => Promise<{ ok: true } | { ok: false; error: string }>;
+  addExpense: (
+    input: AddExpenseInput,
+  ) => Promise<{ ok: true; ids: string[] } | { ok: false; error: string }>;
   /** CSV import (Hebrew headers) with strict dedupe */
   importData: (
     rows: RawImportedEntry[],
@@ -713,6 +746,8 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
     useState<Set<string>>(() => readDeletedBuiltinIds(STORAGE_DELETED_BUILTIN_EXPENSE_CATS));
   const [deletedBuiltinIncomeSourceIds, setDeletedBuiltinIncomeSourceIds] =
     useState<Set<string>>(() => readDeletedBuiltinIds(STORAGE_DELETED_BUILTIN_INCOME_CATS));
+  const [prefsCloudReady, setPrefsCloudReady] = useState(false);
+  const deletedBuiltinCloudTimerRef = useRef<number | null>(null);
   const [paymentMethodOverrides, setPaymentMethodOverrides] = useState<
     Record<string, PaymentMethodOverride>
   >({});
@@ -766,7 +801,7 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
         const { data, error } = await supabase
           .from("expenses")
           .select(
-          "id, user_id, household_id, amount, category, category_id, date, note, currency, is_verified, installments_info, is_recurring, entry_type, payment_method_id, receipt_urls",
+          "id, user_id, household_id, amount, category, category_id, date, note, currency, is_verified, is_reviewed, installments_info, is_recurring, entry_type, payment_method_id, receipt_urls",
           )
           .eq("household_id", householdId)
           .order("date", { ascending: false });
@@ -782,6 +817,76 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
     }
     void loadHouseholdExpenses();
   }, [authLoading, householdId, session, user?.id]);
+
+  useEffect(() => {
+    setPrefsCloudReady(false);
+    if (authLoading || !user?.id || !isValidHouseholdCode(householdId)) return;
+    let cancelled = false;
+    void (async () => {
+      const app = await fetchProfileAppState(user.id);
+      if (cancelled) return;
+      const exp = app[APP_STATE_KEYS.deletedBuiltinExpenseCategoryIds];
+      const inc = app[APP_STATE_KEYS.deletedBuiltinIncomeCategoryIds];
+
+      // Cloud may hold `[]` before first sync or due to older bugs — never drop local deletions;
+      // merge with localStorage so removed default categories stay hidden.
+      const locExp = readDeletedBuiltinIds(STORAGE_DELETED_BUILTIN_EXPENSE_CATS);
+      const cloudExp = deletedBuiltinListFromCloud(exp);
+      const mergedExp = mergeDeletedBuiltinIdLists(exp, locExp);
+      setDeletedBuiltinExpenseCategoryIds(new Set(mergedExp));
+
+      const locInc = readDeletedBuiltinIds(STORAGE_DELETED_BUILTIN_INCOME_CATS);
+      const cloudInc = deletedBuiltinListFromCloud(inc);
+      const mergedInc = mergeDeletedBuiltinIdLists(inc, locInc);
+      setDeletedBuiltinIncomeSourceIds(new Set(mergedInc));
+
+      const repair: Record<string, unknown> = {};
+      if (deletedBuiltinListsDiffer(mergedExp, cloudExp)) {
+        repair[APP_STATE_KEYS.deletedBuiltinExpenseCategoryIds] = mergedExp;
+      }
+      if (deletedBuiltinListsDiffer(mergedInc, cloudInc)) {
+        repair[APP_STATE_KEYS.deletedBuiltinIncomeCategoryIds] = mergedInc;
+      }
+      if (Object.keys(repair).length > 0) {
+        await patchProfileAppState(user.id, repair);
+      }
+
+      if (!cancelled) setPrefsCloudReady(true);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [authLoading, householdId, user?.id]);
+
+  useEffect(() => {
+    return () => {
+      if (deletedBuiltinCloudTimerRef.current != null) {
+        window.clearTimeout(deletedBuiltinCloudTimerRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!prefsCloudReady || !user?.id || !isValidHouseholdCode(householdId)) return;
+    if (deletedBuiltinCloudTimerRef.current != null) {
+      window.clearTimeout(deletedBuiltinCloudTimerRef.current);
+    }
+    deletedBuiltinCloudTimerRef.current = window.setTimeout(() => {
+      deletedBuiltinCloudTimerRef.current = null;
+      void patchProfileAppState(user.id, {
+        [APP_STATE_KEYS.deletedBuiltinExpenseCategoryIds]: [
+          ...deletedBuiltinExpenseCategoryIds,
+        ],
+        [APP_STATE_KEYS.deletedBuiltinIncomeCategoryIds]: [...deletedBuiltinIncomeSourceIds],
+      });
+    }, 450);
+  }, [
+    prefsCloudReady,
+    householdId,
+    user?.id,
+    deletedBuiltinExpenseCategoryIds,
+    deletedBuiltinIncomeSourceIds,
+  ]);
 
   useEffect(() => {
     async function migrateLocalDataOnce() {
@@ -820,6 +925,7 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
               note: row.note,
               currency: row.currency,
               is_verified: row.isVerified === true,
+              is_reviewed: row.isReviewed === true,
               installments_info: {
                 installmentIndex: row.installmentIndex,
                 installments: row.installments,
@@ -872,6 +978,67 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
         } catch {
           /* ignore malformed local assets */
         }
+      }
+
+      try {
+        const existingApp = await fetchProfileAppState(user.id);
+        const patch: Record<string, unknown> = {};
+
+        let localBudgets: Record<string, unknown> = {};
+        try {
+          const br = localStorage.getItem(BUDGET_LOCAL_STORAGE_KEY);
+          if (br) {
+            const p = JSON.parse(br) as unknown;
+            if (p && typeof p === "object" && !Array.isArray(p)) {
+              localBudgets = { ...localBudgets, ...(p as Record<string, unknown>) };
+            }
+          }
+          const scopedKey = `${BUDGET_LOCAL_STORAGE_KEY}__${householdId}`;
+          const sr = localStorage.getItem(scopedKey);
+          if (sr) {
+            const p = JSON.parse(sr) as unknown;
+            if (p && typeof p === "object" && !Array.isArray(p)) {
+              localBudgets = { ...localBudgets, ...(p as Record<string, unknown>) };
+            }
+          }
+        } catch {
+          /* ignore */
+        }
+        const exB = existingApp[APP_STATE_KEYS.budgetsByMonth];
+        const cloudBudgets =
+          exB != null && typeof exB === "object" && !Array.isArray(exB)
+            ? { ...(exB as Record<string, unknown>) }
+            : {};
+        const mergedBudgets = { ...cloudBudgets, ...localBudgets };
+        if (Object.keys(mergedBudgets).length > 0) {
+          patch[APP_STATE_KEYS.budgetsByMonth] = mergedBudgets;
+        }
+
+        const locDelExp = readDeletedBuiltinIds(STORAGE_DELETED_BUILTIN_EXPENSE_CATS);
+        const exDelExp = existingApp[APP_STATE_KEYS.deletedBuiltinExpenseCategoryIds];
+        const cloudDelExp = Array.isArray(exDelExp)
+          ? exDelExp.filter((x): x is string => typeof x === "string")
+          : [];
+        const mergedDelExp = [...new Set([...cloudDelExp, ...locDelExp])];
+        if (mergedDelExp.length > 0) {
+          patch[APP_STATE_KEYS.deletedBuiltinExpenseCategoryIds] = mergedDelExp;
+        }
+
+        const locDelInc = readDeletedBuiltinIds(STORAGE_DELETED_BUILTIN_INCOME_CATS);
+        const exDelInc = existingApp[APP_STATE_KEYS.deletedBuiltinIncomeCategoryIds];
+        const cloudDelInc = Array.isArray(exDelInc)
+          ? exDelInc.filter((x): x is string => typeof x === "string")
+          : [];
+        const mergedDelInc = [...new Set([...cloudDelInc, ...locDelInc])];
+        if (mergedDelInc.length > 0) {
+          patch[APP_STATE_KEYS.deletedBuiltinIncomeCategoryIds] = mergedDelInc;
+        }
+
+        if (Object.keys(patch).length > 0) {
+          await patchProfileAppState(user.id, patch);
+        }
+      } catch {
+        /* still clear local keys */
       }
 
       removeExpandyAppDataKeys();
@@ -1166,6 +1333,7 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
       note: row.note,
       currency: row.currency,
       is_verified: row.isVerified === true,
+      is_reviewed: row.isReviewed === true,
       entry_type: row.type,
       payment_method_id: row.paymentMethodId,
       installments_info: {
@@ -1195,7 +1363,7 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
         error: error instanceof Error ? error.message : "שמירה לענן נכשלה",
       };
     }
-    return { ok: true as const };
+    return { ok: true as const, ids: rows.map((r) => r.id) };
   }, [waitForCloudContext]);
 
   const materializeRecurringForMonth = useCallback(
@@ -1681,6 +1849,7 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
           note: row.note ?? "",
           currency: row.currency,
           is_verified: false,
+          is_reviewed: false,
           entry_type: "income" as const,
           payment_method_id: row.paymentMethodId,
           installments_info: {
@@ -1784,6 +1953,7 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
           note: row.note ?? "",
           currency: row.currency,
           is_verified: false,
+          is_reviewed: false,
           entry_type: "expense" as const,
           payment_method_id: row.paymentMethodId,
           installments_info: {
@@ -2694,8 +2864,14 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
       await Promise.all([
         supabase.from("expenses").delete().eq("household_id", householdId),
         supabase.from("assets").delete().eq("household_id", householdId),
+        supabase.from("savings_goals").delete().eq("household_id", householdId),
         supabase.from("categories").delete().eq("household_id", householdId),
       ]);
+      await patchProfileAppState(user.id, {
+        [APP_STATE_KEYS.deletedBuiltinExpenseCategoryIds]: [],
+        [APP_STATE_KEYS.deletedBuiltinIncomeCategoryIds]: [],
+        [APP_STATE_KEYS.budgetsByMonth]: {},
+      });
     }
     setExpenses([]);
     setCustomIncomeSources([]);

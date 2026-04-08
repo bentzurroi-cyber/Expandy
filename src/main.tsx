@@ -2,6 +2,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App";
 import { AssetsProvider } from "./context/AssetsContext";
+import { SavingsGoalsProvider } from "./context/SavingsGoalsContext";
 import { BudgetProvider } from "./context/BudgetContext";
 import { ExpensesProvider } from "./context/ExpensesContext";
 import { I18nProvider } from "./context/I18nContext";
@@ -27,6 +28,7 @@ createRoot(document.getElementById("root")!).render(
       <AuthProvider>
         <ThemeProvider>
           <AssetsProvider>
+            <SavingsGoalsProvider>
             <BudgetProvider>
               <ExpensesProvider>
                 <App />
@@ -38,6 +40,7 @@ createRoot(document.getElementById("root")!).render(
                 />
               </ExpensesProvider>
             </BudgetProvider>
+            </SavingsGoalsProvider>
           </AssetsProvider>
         </ThemeProvider>
       </AuthProvider>

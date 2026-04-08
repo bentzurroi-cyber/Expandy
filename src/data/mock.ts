@@ -77,6 +77,8 @@ export type Expense = {
   recurringMonthly: boolean;
   /** Bank reconciliation — optional; omitted means not verified. */
   isVerified?: boolean;
+  /** Monthly review reconciliation — optional; omitted means not reviewed. */
+  isReviewed?: boolean;
   /** Public URLs to receipt images in Storage (max 3). */
   receiptUrls?: string[];
 };
@@ -365,6 +367,8 @@ export type AssetAccount = {
   currency: CurrencyCode;
   /** Accent color for UI (hex). */
   color?: string;
+  /** תאריך יתרה ב-DB (`assets.date`), YYYY-MM-DD — לא משנה את חודש התצוגה באפליקציה */
+  balanceDate?: string;
 };
 
 export const MOCK_ASSET_ACCOUNTS: AssetAccount[] = [

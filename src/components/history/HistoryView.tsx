@@ -7,13 +7,12 @@ import { Label } from "@/components/ui/label";
 import {
   Select,
   SelectContent,
-  SelectGroup,
   SelectItem,
   SelectItemText,
-  SelectLabel,
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { CategoryGlyph } from "@/components/expense/FinanceGlyphs";
 import { ColorBadge } from "@/components/expense/ColorBadge";
 import { useFxTick } from "@/context/FxContext";
@@ -39,7 +38,8 @@ import {
   type YearMonth,
 } from "@/lib/month";
 import { capReceiptUrls } from "@/lib/receiptConstants";
-import { parseProjectedRecurringId, projectedRecurringId } from "@/lib/expenseIds";
+import { parseProjectedRecurringId } from "@/lib/expenseIds";
+import { mergeProjectedRecurringExpenses } from "@/lib/recurringProjection";
 import { cn } from "@/lib/utils";
 import {
   Dialog,
@@ -47,12 +47,14 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { FinancialReviewArchivePanel } from "@/components/financialReview/FinancialReviewArchivePanel";
 
 const CATEGORY_ALL = "__all__";
 const EXPENSE_CATEGORY_PREFIX = "exp:";
 const INCOME_CATEGORY_PREFIX = "inc:";
 const METHOD_FILTER_ALL = "__method_all__";
 const DEST_FILTER_ALL = "__dest_all__";
+const CATEGORY_PREVIEW_LIMIT = 5;
 
 /** Older / partial rows may omit `type` or `receiptUrls`; keep History rendering safe. */
 function normalizeHistoryEntryType(e: Pick<Expense, "type"> | null | undefined): "expense" | "income" {
@@ -75,11 +77,6 @@ function safeHistoryInstallments(e: Expense): { installments: number; installmen
   const installmentIndex =
     typeof idxRaw === "number" && Number.isFinite(idxRaw) ? Math.max(1, Math.floor(idxRaw)) : 1;
   return { installments, installmentIndex };
-}
-
-function clampDayForMonth(year: number, month1to12: number, day: number): number {
-  const last = new Date(year, month1to12, 0).getDate();
-  return Math.max(1, Math.min(last, day));
 }
 
 export type HistoryPreset = {
@@ -108,14 +105,16 @@ export function HistoryView({
     paymentMethods,
     destinationAccounts,
     currencies,
-    updateExpense,
     recurringIncomeSkips,
   } = useExpenses();
   const ALL_TIME = "__all_time__" as const;
   const [selectedMonth, setSelectedMonth] = useState<YearMonth | typeof ALL_TIME>(() =>
     formatYearMonth(new Date()),
   );
-  const [categoryFilter, setCategoryFilter] = useState<string>(CATEGORY_ALL);
+  const [categoryFilters, setCategoryFilters] = useState<string[]>([]);
+  const [entryTypeFilter, setEntryTypeFilter] = useState<"all" | "income" | "expense">("all");
+  const [showAllIncomeCategories, setShowAllIncomeCategories] = useState(false);
+  const [showAllExpenseCategories, setShowAllExpenseCategories] = useState(false);
   const [paymentMethodFilter, setPaymentMethodFilter] = useState<string>(METHOD_FILTER_ALL);
   const [destinationFilter, setDestinationFilter] = useState<string>(DEST_FILTER_ALL);
   const [search, setSearch] = useState("");
@@ -129,11 +128,12 @@ export function HistoryView({
     index: number;
   } | null>(null);
   const receiptSwipeStartX = useRef<number | null>(null);
+  const [historyPanel, setHistoryPanel] = useState<"transactions" | "reviews">("transactions");
 
   useLayoutEffect(() => {
     if (!preset) return;
     setSelectedMonth(preset.month);
-    setCategoryFilter(`${EXPENSE_CATEGORY_PREFIX}${preset.categoryId}`);
+    setCategoryFilters([`${EXPENSE_CATEGORY_PREFIX}${preset.categoryId}`]);
     onPresetConsumed();
   }, [preset, onPresetConsumed]);
 
@@ -155,67 +155,104 @@ export function HistoryView({
     }
   }, [destinationFilter, destinationAccounts]);
 
-  const projectedExpenses = useMemo(() => {
-    const valid = expenses.filter(
-      (e) =>
-        e &&
-        typeof e.id === "string" &&
-        typeof e.date === "string" &&
-        typeof e.categoryId === "string" &&
-        typeof e.paymentMethodId === "string" &&
-        typeof e.amount === "number" &&
-        Number.isFinite(e.amount),
-    );
-    const out = [...valid];
-    const ids = new Set(out.map((e) => e.id));
-    const templates = valid.filter((e) => e.recurringMonthly === true);
-    const baseViewYm = selectedMonth === ALL_TIME ? formatYearMonth(new Date()) : selectedMonth;
-    const [vy, vm] = baseViewYm.split("-").map(Number);
-    const viewDate = new Date(vy, vm - 1, 1);
-    const targetYms =
-      selectedMonth === ALL_TIME
-        ? [...new Set(valid.map((e) => e.date.slice(0, 7)))]
-        : [selectedMonth];
+  const categoryFilterSet = useMemo(() => new Set(categoryFilters), [categoryFilters]);
+  const incomeCategoryValues = useMemo(
+    () => incomeSources.map((c) => `${INCOME_CATEGORY_PREFIX}${c.id}`),
+    [incomeSources],
+  );
+  const expenseCategoryValues = useMemo(
+    () => expenseCategories.map((c) => `${EXPENSE_CATEGORY_PREFIX}${c.id}`),
+    [expenseCategories],
+  );
 
-    for (const tmpl of templates) {
-      const baseYm = tmpl.date.slice(0, 7);
-      const [by, bm] = baseYm.split("-").map(Number);
-      if (!Number.isFinite(by) || !Number.isFinite(bm)) continue;
-      const baseDate = new Date(by, bm - 1, 1);
-      for (const ym of targetYms) {
-        if (!/^\d{4}-\d{2}$/.test(ym)) continue;
-        const [ty, tm] = ym.split("-").map(Number);
-        const targetDate = new Date(ty, tm - 1, 1);
-        const monthsFromBase =
-          (targetDate.getFullYear() - baseDate.getFullYear()) * 12 +
-          (targetDate.getMonth() - baseDate.getMonth());
-        const monthsFromView =
-          (targetDate.getFullYear() - viewDate.getFullYear()) * 12 +
-          (targetDate.getMonth() - viewDate.getMonth());
-        if (monthsFromBase < 0) continue;
-        if (monthsFromView > 12) continue; // cap projection horizon
-        if (ym === baseYm) continue;
-        const skips = new Set(recurringIncomeSkips[tmpl.id] ?? []);
-        if (skips.has(ym)) continue;
-        const id = projectedRecurringId(tmpl.id, ym);
-        if (ids.has(id)) continue;
-        const srcDay = Number(tmpl.date.slice(8, 10)) || 1;
-        const safeDay = clampDayForMonth(ty, tm, srcDay);
-        const noteTrim =
-          typeof tmpl.note === "string" ? tmpl.note.trim() : "";
-        out.push({
-          ...tmpl,
-          id,
-          date: `${ym}-${String(safeDay).padStart(2, "0")}`,
-          recurringMonthly: false,
-          installments: 1,
-          installmentIndex: 1,
-          note: noteTrim,
-        });
-        ids.add(id);
-      }
+  const categoryLabelByValue = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const c of incomeSources) {
+      const key = `${INCOME_CATEGORY_PREFIX}${c.id}`;
+      map.set(key, localizedIncomeSourceName(c.id, c.name, lang));
     }
-    return out;
+    for (const c of expenseCategories) {
+      const key = `${EXPENSE_CATEGORY_PREFIX}${c.id}`;
+      map.set(key, localizedExpenseCategoryName(c.id, c.name, lang));
+    }
+    return map;
+  }, [expenseCategories, incomeSources, lang]);
+
+  const categoryFilterSummary = useMemo(() => {
+    if (categoryFilters.length === 0) return t.allCategories;
+    if (categoryFilters.length === 1) {
+      return categoryLabelByValue.get(categoryFilters[0]!) ?? t.allCategories;
+    }
+    return `${categoryFilters.length} ${t.category}`;
+  }, [categoryFilters, categoryLabelByValue, t.allCategories, t.category]);
+
+  const toggleCategoryFilter = useMemo(
+    () => (value: string) => {
+      setCategoryFilters((prev) =>
+        prev.includes(value) ? prev.filter((x) => x !== value) : [...prev, value],
+      );
+    },
+    [],
+  );
+
+  const toggleAllIncomeCategories = useMemo(
+    () => () => {
+      setCategoryFilters((prev) => {
+        const hasAll = incomeCategoryValues.length > 0 && incomeCategoryValues.every((v) => prev.includes(v));
+        if (hasAll) return prev.filter((x) => !incomeCategoryValues.includes(x));
+        const next = new Set(prev);
+        for (const v of incomeCategoryValues) next.add(v);
+        return [...next];
+      });
+    },
+    [incomeCategoryValues],
+  );
+
+  const toggleAllExpenseCategories = useMemo(
+    () => () => {
+      setCategoryFilters((prev) => {
+        const hasAll =
+          expenseCategoryValues.length > 0 && expenseCategoryValues.every((v) => prev.includes(v));
+        if (hasAll) return prev.filter((x) => !expenseCategoryValues.includes(x));
+        const next = new Set(prev);
+        for (const v of expenseCategoryValues) next.add(v);
+        return [...next];
+      });
+    },
+    [expenseCategoryValues],
+  );
+
+  const visibleIncomeSources = useMemo(
+    () =>
+      showAllIncomeCategories
+        ? incomeSources
+        : incomeSources.slice(0, CATEGORY_PREVIEW_LIMIT),
+    [incomeSources, showAllIncomeCategories],
+  );
+  const visibleExpenseCategories = useMemo(
+    () =>
+      showAllExpenseCategories
+        ? expenseCategories
+        : expenseCategories.slice(0, CATEGORY_PREVIEW_LIMIT),
+    [expenseCategories, showAllExpenseCategories],
+  );
+
+  const projectedExpenses = useMemo(() => {
+    const anchor =
+      selectedMonth === ALL_TIME ? formatYearMonth(new Date()) : selectedMonth;
+    if (selectedMonth === ALL_TIME) {
+      return mergeProjectedRecurringExpenses(expenses, recurringIncomeSkips, {
+        mode: "monthsFromData",
+        viewAnchorYm: anchor,
+        capHorizonFromAnchor: true,
+      });
+    }
+    return mergeProjectedRecurringExpenses(expenses, recurringIncomeSkips, {
+      mode: "explicitMonths",
+      months: [selectedMonth],
+      viewAnchorYm: anchor,
+      capHorizonFromAnchor: false,
+    });
   }, [expenses, selectedMonth, ALL_TIME, recurringIncomeSkips]);
 
   const filtered = useMemo(() => {
@@ -235,14 +272,19 @@ export function HistoryView({
       )
       .filter((e) => {
         const rowType = normalizeHistoryEntryType(e);
+        if (entryTypeFilter !== "all" && rowType !== entryTypeFilter) return false;
+        return true;
+      })
+      .filter((e) => {
+        const rowType = normalizeHistoryEntryType(e);
+        if (categoryFilterSet.size === 0) return true;
+        const key =
+          rowType === "income"
+            ? `${INCOME_CATEGORY_PREFIX}${e.categoryId}`
+            : `${EXPENSE_CATEGORY_PREFIX}${e.categoryId}`;
         return (
-          categoryFilter === CATEGORY_ALL ||
-          (categoryFilter.startsWith(EXPENSE_CATEGORY_PREFIX) &&
-            rowType === "expense" &&
-            e.categoryId === categoryFilter.slice(EXPENSE_CATEGORY_PREFIX.length)) ||
-          (categoryFilter.startsWith(INCOME_CATEGORY_PREFIX) &&
-            rowType === "income" &&
-            e.categoryId === categoryFilter.slice(INCOME_CATEGORY_PREFIX.length))
+          categoryFilterSet.has(CATEGORY_ALL) ||
+          categoryFilterSet.has(key)
         );
       })
       .filter((e) => {
@@ -280,7 +322,8 @@ export function HistoryView({
     ALL_TIME,
     projectedExpenses,
     selectedMonth,
-    categoryFilter,
+    categoryFilterSet,
+    entryTypeFilter,
     search,
     incomeSources,
     expenseCategories,
@@ -300,7 +343,7 @@ export function HistoryView({
 
   useEffect(() => {
     setPage(0);
-  }, [selectedMonth, categoryFilter, paymentMethodFilter, destinationFilter, search]);
+  }, [selectedMonth, categoryFilters, entryTypeFilter, paymentMethodFilter, destinationFilter, search]);
 
   useEffect(() => {
     setPage(0);
@@ -325,6 +368,37 @@ export function HistoryView({
   return (
     <div className="flex flex-col gap-3" dir={dir}>
       <h1 className="sr-only">{t.historyTitle}</h1>
+      <div className="flex gap-1 rounded-2xl border border-border/60 bg-muted/25 p-1">
+        <button
+          type="button"
+          onClick={() => setHistoryPanel("transactions")}
+          className={cn(
+            "min-h-11 flex-1 rounded-xl px-3 py-2.5 text-sm font-medium transition-all",
+            historyPanel === "transactions"
+              ? "bg-background text-foreground shadow-sm"
+              : "text-muted-foreground hover:text-foreground",
+          )}
+        >
+          {t.historyTabTransactions}
+        </button>
+        <button
+          type="button"
+          onClick={() => setHistoryPanel("reviews")}
+          className={cn(
+            "min-h-11 flex-1 rounded-xl px-3 py-2.5 text-sm font-medium transition-all",
+            historyPanel === "reviews"
+              ? "bg-background text-foreground shadow-sm"
+              : "text-muted-foreground hover:text-foreground",
+          )}
+        >
+          {t.historyTabReviews}
+        </button>
+      </div>
+
+      {historyPanel === "reviews" ? (
+        <FinancialReviewArchivePanel />
+      ) : (
+        <>
       <div className="-mx-4 border-b border-border/80 bg-gradient-to-b from-muted/25 to-background px-4 py-3">
         <div className="mx-auto w-full max-w-4xl space-y-3">
           <div className="flex flex-wrap items-end justify-between gap-x-3 gap-y-1">
@@ -363,57 +437,139 @@ export function HistoryView({
               />
             </div>
             <div className="space-y-1">
-              <Label htmlFor="hist-cat" className="text-xs font-medium text-muted-foreground">
-                {t.category}
+              <Label htmlFor="hist-type" className="text-xs font-medium text-muted-foreground">
+                {t.historyTypeFilterLabel}
               </Label>
-              <Select value={categoryFilter} onValueChange={setCategoryFilter}>
-                <SelectTrigger id="hist-cat" className="min-h-10 w-full">
+              <Select
+                value={entryTypeFilter}
+                onValueChange={(v) => setEntryTypeFilter(v as "all" | "income" | "expense")}
+              >
+                <SelectTrigger id="hist-type" className="min-h-10 w-full">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent position="popper">
-                  <SelectItem value={CATEGORY_ALL} textValue={t.allCategories}>
-                    <SelectItemText>{t.allCategories}</SelectItemText>
+                  <SelectItem value="all" textValue={t.historyTypeAll}>
+                    <SelectItemText>{t.historyTypeAll}</SelectItemText>
                   </SelectItem>
-                  <SelectGroup>
-                    <SelectLabel>{t.historyGroupIncome}</SelectLabel>
-                    {incomeSources.map((c) => {
-                      const label = localizedIncomeSourceName(c.id, c.name, lang);
-                      return (
-                        <SelectItem
-                          key={`inc-${c.id}`}
-                          value={`${INCOME_CATEGORY_PREFIX}${c.id}`}
-                          textValue={label}
-                        >
-                          <span className="flex items-center gap-2">
-                            <CategoryGlyph iconKey={c.iconKey} className="size-3.5" />
-                            <ColorBadge color={c.color} />
-                            <SelectItemText>{label}</SelectItemText>
-                          </span>
-                        </SelectItem>
-                      );
-                    })}
-                  </SelectGroup>
-                  <SelectGroup>
-                    <SelectLabel>{t.historyGroupExpense}</SelectLabel>
-                    {expenseCategories.map((c) => {
-                      const label = localizedExpenseCategoryName(c.id, c.name, lang);
-                      return (
-                        <SelectItem
-                          key={`exp-${c.id}`}
-                          value={`${EXPENSE_CATEGORY_PREFIX}${c.id}`}
-                          textValue={label}
-                        >
-                          <span className="flex items-center gap-2">
-                            <CategoryGlyph iconKey={c.iconKey} className="size-3.5" />
-                            <ColorBadge color={c.color} />
-                            <SelectItemText>{label}</SelectItemText>
-                          </span>
-                        </SelectItem>
-                      );
-                    })}
-                  </SelectGroup>
+                  <SelectItem value="income" textValue={t.historyTypeIncome}>
+                    <SelectItemText>{t.historyTypeIncome}</SelectItemText>
+                  </SelectItem>
+                  <SelectItem value="expense" textValue={t.historyTypeExpense}>
+                    <SelectItemText>{t.historyTypeExpense}</SelectItemText>
+                  </SelectItem>
                 </SelectContent>
               </Select>
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="hist-cat" className="text-xs font-medium text-muted-foreground">
+                {t.category}
+              </Label>
+              <Popover>
+                <PopoverTrigger asChild>
+                  <Button
+                    id="hist-cat"
+                    type="button"
+                    variant="outline"
+                    className="min-h-10 w-full justify-between"
+                  >
+                    <span className="truncate">{categoryFilterSummary}</span>
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent align="start" className="w-[22rem] p-2">
+                  <button
+                    type="button"
+                    className="flex w-full items-center justify-between rounded-lg px-2 py-1.5 text-sm hover:bg-accent"
+                    onClick={() => setCategoryFilters([])}
+                  >
+                    <span>{t.allCategories}</span>
+                    {categoryFilters.length === 0 ? <Check className="size-4" aria-hidden /> : null}
+                  </button>
+                  <div className="my-2 h-px bg-border/70" />
+                  <p className="px-2 py-1 text-xs text-muted-foreground">{t.historyGroupIncome}</p>
+                  <button
+                    type="button"
+                    className="mb-1 flex w-full items-center justify-between rounded-lg px-2 py-1.5 text-sm hover:bg-accent"
+                    onClick={toggleAllIncomeCategories}
+                  >
+                    <span>{t.historyTypeIncome}</span>
+                    {incomeCategoryValues.length > 0 &&
+                    incomeCategoryValues.every((v) => categoryFilterSet.has(v)) ? (
+                      <Check className="size-4" aria-hidden />
+                    ) : null}
+                  </button>
+                  {visibleIncomeSources.map((c) => {
+                    const value = `${INCOME_CATEGORY_PREFIX}${c.id}`;
+                    const label = localizedIncomeSourceName(c.id, c.name, lang);
+                    const on = categoryFilterSet.has(value);
+                    return (
+                      <button
+                        key={`inc-${c.id}`}
+                        type="button"
+                        className="flex w-full items-center justify-between rounded-lg px-2 py-1.5 text-sm hover:bg-accent"
+                        onClick={() => toggleCategoryFilter(value)}
+                      >
+                        <span className="flex min-w-0 items-center gap-2">
+                          <CategoryGlyph iconKey={c.iconKey} className="size-3.5" />
+                          <ColorBadge color={c.color} />
+                          <span className="truncate">{label}</span>
+                        </span>
+                        {on ? <Check className="size-4 shrink-0" aria-hidden /> : null}
+                      </button>
+                    );
+                  })}
+                  {incomeSources.length > CATEGORY_PREVIEW_LIMIT ? (
+                    <button
+                      type="button"
+                      className="mt-1 w-full rounded-lg px-2 py-1.5 text-sm text-primary hover:bg-accent"
+                      onClick={() => setShowAllIncomeCategories((v) => !v)}
+                    >
+                      {showAllIncomeCategories ? t.iconPickerHide : t.iconPickerShowMore}
+                    </button>
+                  ) : null}
+                  <div className="my-2 h-px bg-border/70" />
+                  <p className="px-2 py-1 text-xs text-muted-foreground">{t.historyGroupExpense}</p>
+                  <button
+                    type="button"
+                    className="mb-1 flex w-full items-center justify-between rounded-lg px-2 py-1.5 text-sm hover:bg-accent"
+                    onClick={toggleAllExpenseCategories}
+                  >
+                    <span>{t.historyTypeExpense}</span>
+                    {expenseCategoryValues.length > 0 &&
+                    expenseCategoryValues.every((v) => categoryFilterSet.has(v)) ? (
+                      <Check className="size-4" aria-hidden />
+                    ) : null}
+                  </button>
+                  {visibleExpenseCategories.map((c) => {
+                    const value = `${EXPENSE_CATEGORY_PREFIX}${c.id}`;
+                    const label = localizedExpenseCategoryName(c.id, c.name, lang);
+                    const on = categoryFilterSet.has(value);
+                    return (
+                      <button
+                        key={`exp-${c.id}`}
+                        type="button"
+                        className="flex w-full items-center justify-between rounded-lg px-2 py-1.5 text-sm hover:bg-accent"
+                        onClick={() => toggleCategoryFilter(value)}
+                      >
+                        <span className="flex min-w-0 items-center gap-2">
+                          <CategoryGlyph iconKey={c.iconKey} className="size-3.5" />
+                          <ColorBadge color={c.color} />
+                          <span className="truncate">{label}</span>
+                        </span>
+                        {on ? <Check className="size-4 shrink-0" aria-hidden /> : null}
+                      </button>
+                    );
+                  })}
+                  {expenseCategories.length > CATEGORY_PREVIEW_LIMIT ? (
+                    <button
+                      type="button"
+                      className="mt-1 w-full rounded-lg px-2 py-1.5 text-sm text-primary hover:bg-accent"
+                      onClick={() => setShowAllExpenseCategories((v) => !v)}
+                    >
+                      {showAllExpenseCategories ? t.iconPickerHide : t.iconPickerShowMore}
+                    </button>
+                  ) : null}
+                </PopoverContent>
+              </Popover>
             </div>
             <div className="space-y-1">
               <Label htmlFor="hist-pay" className="text-xs font-medium text-muted-foreground">
@@ -518,7 +674,6 @@ export function HistoryView({
             }
             const dateStr = typeof e.date === "string" ? e.date : "";
             const dateLabel = dateStr ? formatDateDDMMYYYY(dateStr) : "—";
-            const verified = e.isVerified === true;
             const { installments: instCount, installmentIndex: instIdx } = safeHistoryInstallments(e);
             const isProjectedRecurring = parseProjectedRecurringId(e.id) != null;
             const installmentText =
@@ -639,23 +794,6 @@ export function HistoryView({
                     <ImageIcon className="size-4 shrink-0" strokeWidth={1.75} aria-hidden />
                   </button>
                 ) : null}
-                <button
-                  type="button"
-                  className={cn(
-                    "shrink-0 self-center rounded-lg p-2.5 text-muted-foreground transition-colors",
-                    "hover:bg-accent/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                    verified && "text-green-500",
-                    !verified && "opacity-50",
-                  )}
-                  aria-label={verified ? t.verifiedAriaVerified : t.verifiedAriaUnverified}
-                  aria-pressed={verified}
-                  onClick={(ev) => {
-                    ev.stopPropagation();
-                    updateExpense(e.id, { isVerified: !verified });
-                  }}
-                >
-                  <Check className="size-4 stroke-[2.5]" />
-                </button>
               </li>
             );
           })
@@ -821,6 +959,8 @@ export function HistoryView({
           )}
         </footer>
       ) : null}
+        </>
+      )}
     </div>
   );
 }

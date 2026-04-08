@@ -3,11 +3,17 @@ import { ChevronLeft, ChevronRight } from "lucide-react";
 import { DayPicker } from "react-day-picker";
 import { cn } from "@/lib/utils";
 
+/** Wider than DayPicker’s default (current year) so target dates can reach e.g. 2050. */
+const CALENDAR_START_MONTH = new Date(1990, 0, 1);
+const CALENDAR_END_MONTH = new Date(2050, 11, 31);
+
 export type CalendarProps = React.ComponentProps<typeof DayPicker>;
 
 function Calendar({ className, classNames, ...props }: CalendarProps) {
   return (
     <DayPicker
+      startMonth={CALENDAR_START_MONTH}
+      endMonth={CALENDAR_END_MONTH}
       className={cn("p-3 text-foreground", className)}
       classNames={{
         root: cn("w-full"),

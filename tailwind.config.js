@@ -46,12 +46,50 @@ export default {
       },
       fontFamily: {
         sans: [
+          "Inter",
           "Rubik",
           "Segoe UI",
           "ui-sans-serif",
           "system-ui",
           "sans-serif",
         ],
+      },
+      keyframes: {
+        savingsBarPulse: {
+          "0%": {
+            filter: "brightness(1)",
+            transform: "scaleY(1)",
+            boxShadow: "0 0 0 0 rgba(16, 185, 129, 0)",
+          },
+          "35%": {
+            filter: "brightness(1.22)",
+            transform: "scaleY(1.28)",
+            boxShadow: "0 0 24px 6px rgba(16, 185, 129, 0.45)",
+          },
+          "55%": {
+            filter: "brightness(1.12)",
+            transform: "scaleY(1.12)",
+            boxShadow: "0 0 16px 4px rgba(16, 185, 129, 0.3)",
+          },
+          "100%": {
+            filter: "brightness(1)",
+            transform: "scaleY(1)",
+            boxShadow: "0 0 0 0 rgba(16, 185, 129, 0)",
+          },
+        },
+        savingsBarIdle: {
+          "0%, 100%": { filter: "brightness(1)", opacity: "0.92" },
+          "50%": { filter: "brightness(1.08)", opacity: "1" },
+        },
+        financialReviewStep: {
+          "0%": { opacity: "0", transform: "translateY(6px)" },
+          "100%": { opacity: "1", transform: "translateY(0)" },
+        },
+      },
+      animation: {
+        "savings-bar-pulse": "savingsBarPulse 0.95s cubic-bezier(0.22, 1, 0.36, 1)",
+        "savings-bar-idle": "savingsBarIdle 2.8s ease-in-out infinite",
+        "financial-review-step": "financialReviewStep 0.38s ease-out both",
       },
     },
   },

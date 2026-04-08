@@ -133,7 +133,7 @@ export function parseEntryTypeLabel(label: string): EntryType | null {
 export function parseAmountToNumber(s: string): number | null {
   const raw = s.trim();
   if (!raw) return null;
-  const cleaned = raw.replace(/,/g, "").replace(/[^\d.\-]/g, "");
+  const cleaned = raw.replace(/,/g, "").replace(/[^\d.-]/g, "");
   const n = Number(cleaned);
   if (!Number.isFinite(n)) return null;
   return n;

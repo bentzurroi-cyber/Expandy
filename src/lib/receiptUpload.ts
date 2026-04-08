@@ -20,7 +20,7 @@ export async function uploadReceiptImage(params: {
 }): Promise<{ url: string } | { error: string }> {
   const { householdId, userId, expenseId, file } = params;
   const slot = typeof params.slotIndex === "number" ? Math.max(0, Math.min(2, params.slotIndex)) : 0;
-  const safeName = file.name.replace(/[^\w.\-]+/g, "_").slice(0, 80);
+  const safeName = file.name.replace(/[^\w.-]+/g, "_").slice(0, 80);
   const ext =
     safeName.includes(".") && safeName.length > 1
       ? safeName.slice(safeName.lastIndexOf("."))

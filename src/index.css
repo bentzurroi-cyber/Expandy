@@ -102,4 +102,6 @@ input[type="number"] {
 }
 .no-scrollbar::-webkit-scrollbar {
   display: none; /* Chrome/Safari */
+  width: 0;
+  height: 0;
 }

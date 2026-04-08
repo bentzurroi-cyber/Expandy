@@ -1,10 +1,22 @@
-/** שערי המרה לשקל — Frankfurter עם נפילה לשערים סטטיים */
+/** שערי המרה לשקל — Frankfurter (HTTPS) עם נפילה לשערים סטטיים */
 
 const STATIC_RATES_TO_ILS: Record<string, number> = {
   ILS: 1,
-  USD: 3.6,
-  EUR: 4.0,
+  USD: 3.65,
+  EUR: 3.95,
+  GBP: 4.6,
+  CHF: 4.1,
+  JPY: 0.024,
 };
+
+const FRANKFURTER_URLS = [
+  (d: string, from: string) =>
+    `https://api.frankfurter.dev/v1/${d}?from=${encodeURIComponent(from)}&to=ILS`,
+  (d: string, from: string) =>
+    `https://api.frankfurter.app/v1/${d}?from=${encodeURIComponent(from)}&to=ILS`,
+  (d: string, from: string) =>
+    `https://api.frankfurter.app/${d}?from=${encodeURIComponent(from)}&to=ILS`,
+] as const;
 
 const rateCache = new Map<string, number>();
 const inflight = new Map<string, Promise<number>>();
@@ -22,23 +34,43 @@ function staticRate(currency: string): number {
   return STATIC_RATES_TO_ILS[currency] ?? 1;
 }
 
-async function fetchFrankfurterRate(
-  from: string,
-  date: string,
-): Promise<number> {
+async function fetchFrankfurterRateOnce(url: string, signal: AbortSignal): Promise<number> {
+  const res = await fetch(url, {
+    signal,
+    method: "GET",
+    mode: "cors",
+    credentials: "omit",
+    redirect: "follow",
+    headers: { Accept: "application/json" },
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  let data: unknown;
+  try {
+    data = await res.json();
+  } catch {
+    throw new Error("invalid JSON");
+  }
+  const ils = (data as { rates?: { ILS?: number } })?.rates?.ILS;
+  if (typeof ils !== "number" || !Number.isFinite(ils) || ils <= 0) {
+    throw new Error("missing ILS rate");
+  }
+  return ils;
+}
+
+async function fetchFrankfurterRate(from: string, date: string): Promise<number> {
   const d = normalizeDate(date);
-  const url = `https://api.frankfurter.app/${d}?from=${encodeURIComponent(from)}&to=ILS`;
   const ctrl = new AbortController();
   const t = window.setTimeout(() => ctrl.abort(), 8000);
   try {
-    const res = await fetch(url, { signal: ctrl.signal });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = (await res.json()) as { rates?: { ILS?: number } };
-    const ils = data.rates?.ILS;
-    if (typeof ils !== "number" || !Number.isFinite(ils)) {
-      throw new Error("missing ILS rate");
+    let lastErr: unknown = null;
+    for (const buildUrl of FRANKFURTER_URLS) {
+      try {
+        return await fetchFrankfurterRateOnce(buildUrl(d, from), ctrl.signal);
+      } catch (e) {
+        lastErr = e;
+      }
     }
-    return ils;
+    throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
   } finally {
     window.clearTimeout(t);
   }
@@ -46,7 +78,11 @@ async function fetchFrankfurterRate(
 
 /** Loads the ILS rate for an ISO currency on a given date into the cache (Frankfurter + static fallback). */
 export async function prefetchFxRate(currency: string, date: string): Promise<number> {
-  return resolveRate(currency, normalizeDate(date));
+  try {
+    return await resolveRate(currency, normalizeDate(date));
+  } catch {
+    return staticRate(currency);
+  }
 }
 
 async function resolveRate(currency: string, date: string): Promise<number> {
@@ -85,22 +121,32 @@ async function resolveRate(currency: string, date: string): Promise<number> {
 export async function warmupFxRates(
   pairs: ReadonlyArray<{ date: string; currency: string }>,
 ): Promise<void> {
-  const uniq = new Map<string, { date: string; currency: string }>();
-  for (const p of pairs) {
-    if (!p.currency || p.currency === "ILS") continue;
-    const key = cacheKey(p.date, p.currency);
-    if (rateCache.has(key)) continue;
-    uniq.set(key, p);
+  try {
+    const uniq = new Map<string, { date: string; currency: string }>();
+    for (const p of pairs) {
+      if (!p.currency || p.currency === "ILS") continue;
+      const key = cacheKey(p.date, p.currency);
+      if (rateCache.has(key)) continue;
+      uniq.set(key, p);
+    }
+    await Promise.all(
+      [...uniq.values()].map((p) =>
+        resolveRate(p.currency, p.date).catch(() => staticRate(p.currency)),
+      ),
+    );
+  } catch {
+    /* כל זוג ייפול בנפרד ל-static דרך resolveRate */
   }
-  await Promise.all(
-    [...uniq.values()].map((p) => resolveRate(p.currency, p.date)),
-  );
 }
 
 export function getFxRateSync(currency: string, date: string): number {
-  if (!currency || currency === "ILS") return 1;
-  const key = cacheKey(date, currency);
-  return rateCache.get(key) ?? staticRate(currency);
+  try {
+    if (!currency || currency === "ILS") return 1;
+    const key = cacheKey(date, currency);
+    return rateCache.get(key) ?? staticRate(currency);
+  } catch {
+    return staticRate(currency);
+  }
 }
 
 export function convertToILS(
@@ -108,5 +154,11 @@ export function convertToILS(
   currency: string,
   date: string,
 ): number {
-  return amount * getFxRateSync(currency, date);
+  try {
+    const n = Number(amount);
+    if (!Number.isFinite(n)) return 0;
+    return n * getFxRateSync(currency, date);
+  } catch {
+    return 0;
+  }
 }

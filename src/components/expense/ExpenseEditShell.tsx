@@ -263,10 +263,7 @@ export function ExpenseEditShell({
       if (!receiptSlotsUnchanged(receiptSlots, baselineReceiptUrls)) {
         const toDelete = baselineReceiptUrls.filter((u) => !finalUrls.includes(u));
         if (toDelete.length) {
-          const del = await deleteReceiptObjectsByPublicUrls(toDelete);
-          if (del.error) {
-            console.warn("[ExpenseEdit] Storage cleanup after receipt change failed", del.error);
-          }
+          await deleteReceiptObjectsByPublicUrls(toDelete);
         }
       }
 

@@ -3,6 +3,7 @@ import {
   Bookmark,
   ChevronDown,
   Download,
+  Eye,
   Lightbulb,
   Pencil,
   Trash2,
@@ -52,6 +53,7 @@ import {
   hebrewMonthYearLabel,
   type YearMonth,
 } from "@/lib/month";
+import { useFinancialReviewModal } from "@/context/FinancialReviewModalContext";
 import { useI18n } from "@/context/I18nContext";
 import { cn } from "@/lib/utils";
 import { formatNumericInput, parseNumericInput } from "@/utils/formatters";
@@ -74,6 +76,7 @@ import {
   localizedPaymentMethodName,
 } from "@/lib/defaultEntityLabels";
 import { SortableSettingsCategoryList } from "@/components/settings/SortableSettingsCategoryList";
+import { SavingsGoalsManagement } from "@/components/assets/SavingsGoalsManagement";
 import { useAuth } from "@/context/AuthContext";
 import { supabase } from "@/lib/supabase";
 import {
@@ -140,9 +143,9 @@ async function countProfilesForHousehold(householdId: string): Promise<number> {
   return count ?? 0;
 }
 
-/** Sum of rows across shared tables for this household (expenses, assets, categories, settings). */
+/** Sum of rows across shared tables for this household (expenses, assets, categories). */
 async function countHouseholdSharedDataRows(householdId: string): Promise<number> {
-  const tables = ["expenses", "assets", "categories", "settings"] as const;
+  const tables = ["expenses", "assets", "categories"] as const;
   let sum = 0;
   for (const table of tables) {
     const { count, error } = await supabase
@@ -165,6 +168,7 @@ export function SettingsView() {
     expenses: "import-expenses-status",
   } as const;
   const { lang, setLang, t, dir } = useI18n();
+  const { openFinancialReviewModal } = useFinancialReviewModal();
   const { user, profile, refreshProfile } = useAuth();
   const {
     getBudget,
@@ -236,6 +240,70 @@ export function SettingsView() {
   const [leaveLoading, setLeaveLoading] = useState(false);
   const [householdMembers, setHouseholdMembers] = useState<string[]>([]);
   const [membersLoading, setMembersLoading] = useState(false);
+  const [reviewDayInput, setReviewDayInput] = useState("");
+
+  useEffect(() => {
+    const d = profile?.review_day;
+    setReviewDayInput(d == null || !Number.isFinite(d) ? "" : String(Math.floor(Number(d))));
+  }, [profile?.review_day]);
+
+  const persistReviewDay = useCallback(
+    async (opts: { allowClear?: boolean; showToast?: boolean } = {}) => {
+      const allowClear = opts.allowClear ?? false;
+      const showToast = opts.showToast ?? true;
+      if (!user?.id) return false;
+      const raw = reviewDayInput.trim();
+      let review_day: number | null = null;
+      if (raw) {
+        const n = Number(raw);
+        if (!Number.isFinite(n) || n < 1 || n > 31) {
+          toast.error(lang === "he" ? "יום לא חוקי (1–31)" : "Invalid day (1–31)");
+          const cur = profile?.review_day;
+          setReviewDayInput(
+            cur == null || !Number.isFinite(Number(cur))
+              ? ""
+              : String(Math.floor(Number(cur))),
+          );
+          return false;
+        }
+        review_day = Math.floor(n);
+      } else {
+        if (!allowClear) {
+          const cur = profile?.review_day;
+          setReviewDayInput(
+            cur == null || !Number.isFinite(Number(cur))
+              ? ""
+              : String(Math.floor(Number(cur))),
+          );
+          return false;
+        }
+        review_day = null;
+      }
+      const prof = profile?.review_day;
+      const profN =
+        prof != null && Number.isFinite(Number(prof)) ? Math.floor(Number(prof)) : null;
+      if (profN === review_day) return true;
+      const { error } = await supabase
+        .from("profiles")
+        .update({ review_day })
+        .eq("id", user.id);
+      if (error) {
+        toast.error(error.message);
+        return false;
+      }
+      await refreshProfile();
+      if (showToast) toast.success(t.settingsReviewDaySaveNote);
+      return true;
+    },
+    [
+      user?.id,
+      reviewDayInput,
+      profile?.review_day,
+      refreshProfile,
+      lang,
+      t.settingsReviewDaySaveNote,
+    ],
+  );
   const [membersError, setMembersError] = useState<string | null>(null);
   const [autoFixingHouseholdCode, setAutoFixingHouseholdCode] = useState(false);
   const [displayHouseholdCode, setDisplayHouseholdCode] = useState("");
@@ -975,13 +1043,7 @@ export function SettingsView() {
       }
 
       if (canDeleteEmptyHouseholdRow) {
-        const { error: delErr } = await supabase
-          .from("households")
-          .delete()
-          .eq("code", oldHouseholdId);
-        if (delErr) {
-          console.warn("[Settings] leave: could not remove empty household row", delErr);
-        }
+        await supabase.from("households").delete().eq("code", oldHouseholdId);
       }
 
       setDisplayHouseholdCode(newCode);
@@ -1526,6 +1588,71 @@ export function SettingsView() {
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
+          <details className="rounded-xl border border-border/60 bg-background/40 p-3">
+            <summary className="cursor-pointer text-sm font-medium">{t.settingsReviewDayTitle}</summary>
+            <div className="mt-3 space-y-4">
+              <p className="text-sm leading-relaxed text-muted-foreground">{t.settingsReviewDayDesc}</p>
+              <div className="space-y-2">
+                <Label htmlFor="settings-review-day">{t.settingsReviewDayPlaceholder}</Label>
+                <Input
+                  id="settings-review-day"
+                  type="number"
+                  min={1}
+                  max={31}
+                  inputMode="numeric"
+                  className="h-11 max-w-[8rem] rounded-xl border border-border/35 focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-offset-1"
+                  placeholder="—"
+                  value={reviewDayInput}
+                  onChange={(e) => setReviewDayInput(e.target.value.replace(/[^\d]/g, ""))}
+                  onBlur={() => void persistReviewDay({ allowClear: false, showToast: false })}
+                />
+              </div>
+              <div className="flex flex-wrap items-center gap-3">
+                <Button
+                  type="button"
+                  size="sm"
+                  className="rounded-xl"
+                  disabled={!user?.id}
+                  onClick={() => void persistReviewDay({ allowClear: true, showToast: true })}
+                >
+                  {t.saveChanges}
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="gap-2 rounded-xl"
+                  onClick={() => openFinancialReviewModal()}
+                >
+                  {t.settingsReviewDayStartNow}
+                  <Eye className="size-4 shrink-0 opacity-90" aria-hidden />
+                </Button>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="rounded-xl"
+                  disabled={!user?.id}
+                  onClick={async () => {
+                    if (!user?.id) return;
+                    setReviewDayInput("");
+                    const { error } = await supabase
+                      .from("profiles")
+                      .update({ review_day: null })
+                      .eq("id", user.id);
+                    if (error) {
+                      toast.error(error.message);
+                      return;
+                    }
+                    await refreshProfile();
+                    toast.success(t.settingsReviewDaySaveNote);
+                  }}
+                >
+                  {t.settingsReviewDayClear}
+                </Button>
+              </div>
+            </div>
+          </details>
           <details className="rounded-xl border border-border/60 bg-background/40 p-3">
             <summary className="cursor-pointer text-sm font-medium">
               {lang === "he" ? "אמצעי תשלום" : "Default payment method"}
@@ -2297,6 +2424,8 @@ export function SettingsView() {
         </CardContent>
       </Card>
       ) : null}
+
+      {activeTab === "finance" ? <SavingsGoalsManagement /> : null}
 
       {activeTab === "data" ? (
       <Card className="rounded-2xl border-destructive/40 bg-zinc-100 p-1 shadow-none dark:bg-zinc-900">

@@ -5,6 +5,8 @@ import { ExpenseEditShell } from "@/components/expense/ExpenseEditShell";
 import { EntryForm } from "@/components/EntryForm";
 import { History, type HistoryPreset } from "@/components/History";
 import { AppShell, type AppView } from "@/components/layout/AppShell";
+import { FinancialReviewBanner } from "@/components/financialReview/FinancialReviewBanner";
+import { FinancialReviewModalHost } from "@/context/FinancialReviewModalContext";
 import { Settings } from "@/components/Settings";
 import { AuthScreen } from "@/components/auth/AuthScreen";
 import { useAuth } from "@/context/AuthContext";
@@ -65,27 +67,30 @@ export default function App() {
         </div>
       ) : null}
       <AppShell view={view} onViewChange={setView}>
-        {view === "entry" ? (
-          <EntryForm />
-        ) : view === "dashboard" ? (
-          <Dashboard
-            onEditExpense={setEditing}
-            onCategoryDrillDown={(categoryId, month) => {
-              setHistoryPreset({ month, categoryId });
-              setView("history");
-            }}
-          />
-        ) : view === "history" ? (
-          <History
-            preset={historyPreset}
-            onPresetConsumed={consumeHistoryPreset}
-            onEditExpense={setEditing}
-          />
-        ) : view === "assets" ? (
-          <Assets isActive={view === "assets"} />
-        ) : (
-          <Settings />
-        )}
+        <FinancialReviewModalHost>
+          <FinancialReviewBanner />
+          {view === "entry" ? (
+            <EntryForm />
+          ) : view === "dashboard" ? (
+            <Dashboard
+              onEditExpense={setEditing}
+              onCategoryDrillDown={(categoryId, month) => {
+                setHistoryPreset({ month, categoryId });
+                setView("history");
+              }}
+            />
+          ) : view === "history" ? (
+            <History
+              preset={historyPreset}
+              onPresetConsumed={consumeHistoryPreset}
+              onEditExpense={setEditing}
+            />
+          ) : view === "assets" ? (
+            <Assets isActive={view === "assets"} />
+          ) : (
+            <Settings />
+          )}
+        </FinancialReviewModalHost>
       </AppShell>
       <ExpenseEditShell
         expense={editing}
