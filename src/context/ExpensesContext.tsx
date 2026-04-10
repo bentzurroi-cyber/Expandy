@@ -60,6 +60,20 @@ import { capReceiptUrls, MAX_RECEIPT_IMAGES } from "@/lib/receiptConstants";
 import { uploadReceiptImagesParallel } from "@/lib/receiptUpload";
 import { toast } from "sonner";
 
+// Default categories seeded only when a user explicitly starts a fresh household
+// (leave flow with "clean slate"). Never seeded reactively.
+const DEFAULT_STARTER_CATEGORIES: ReadonlyArray<{
+  name: string;
+  color: string;
+  iconKey: string;
+}> = [
+  { name: "אוכל",              color: "#22c55e", iconKey: "utensils"      },
+  { name: "תחבורה",            color: "#38bdf8", iconKey: "car"           },
+  { name: "מגורים/חשבונות",   color: "#a78bfa", iconKey: "home"          },
+  { name: "קניות",             color: "#f59e0b", iconKey: "shopping-bag"  },
+  { name: "פנאי",              color: "#f43f5e", iconKey: "party-popper"  },
+];
+
 function supabaseErrorMessage(error: unknown): string {
   if (error instanceof Error) return error.message;
   if (error && typeof error === "object" && "message" in error) {
@@ -78,6 +92,7 @@ type CategoryUpsertRow = {
   color: string;
   icon: string;
 };
+
 
 /** Avoid unique (household_id, type, name) violations when the batch has duplicate names. */
 function dedupeCategoryUpsertRows(rows: CategoryUpsertRow[]): CategoryUpsertRow[] {
@@ -120,6 +135,7 @@ const STORAGE_DELETED_BUILTIN_EXPENSE_CATS = "expandy-deleted-builtin-expense-ca
 const STORAGE_DELETED_BUILTIN_INCOME_CATS = "expandy-deleted-builtin-income-cats-v1";
 const STORAGE_EXPENSE_CATEGORY_ORDER = "expandy-expense-category-order-v1";
 const STORAGE_INCOME_CATEGORY_ORDER = "expandy-income-category-order-v1";
+const STORAGE_ACTIVE_AUTH_USER = "expandy-active-auth-user-v1";
 
 function readDeletedBuiltinIds(key: string): Set<string> {
   try {
@@ -418,12 +434,19 @@ function categoryToSupabaseRow(
   };
 }
 
-function scheduleDeleteCategoryFromSupabase(
+async function deleteCategoryFromSupabase(
   householdId: string,
   categoryId: string,
-) {
-  if (!isValidHouseholdCode(householdId) || !isStandardUuid(categoryId)) return;
-  void supabase.from("categories").delete().eq("id", categoryId).eq("household_id", householdId);
+): Promise<{ error: unknown | null }> {
+  if (!isValidHouseholdCode(householdId) || !isStandardUuid(categoryId)) {
+    return { error: null };
+  }
+  const { error } = await supabase
+    .from("categories")
+    .delete()
+    .eq("id", categoryId)
+    .eq("household_id", householdId);
+  return { error };
 }
 
 function normalizeCategoryDisplayLimit(value: unknown): number {
@@ -642,6 +665,27 @@ type ExpensesContextValue = {
   stopRecurringIncome: (templateId: string) => void;
   /** Clear all user data in this context (expenses + custom lists). Caller should also remove app keys from localStorage. */
   clearAllUserData: () => Promise<void>;
+  /** Local-only state reset (no DB deletes). */
+  resetLocalState: () => void;
+  /**
+   * Imperatively begin a household transition: sets the sync lock, wipes ALL
+   * local React state, and aggressively clears localStorage + IndexedDB.
+   * Call this BEFORE any Supabase writes that change household_id so the
+   * reactive sync effect cannot push stale data into the new household.
+   * The lock is released automatically by the household-change useEffect once
+   * the fresh Supabase fetch completes (triggered by refreshProfile()).
+   */
+  beginHouseholdTransition: () => void;
+  /**
+   * Imperatively seed the 5 default ("Starter Pack") categories for a specific
+   * userId/householdId. Generates fresh UUIDs every call — no hardcoded IDs.
+   * Returns { ok, error }. Call this only during the explicit "Leave → Fresh
+   * slate" flow, never reactively.
+   */
+  seedStarterPack: (
+    userId: string,
+    householdId: string,
+  ) => Promise<{ ok: boolean; error?: unknown }>;
 };
 
 const ExpensesContext = createContext<ExpensesContextValue | null>(null);
@@ -674,7 +718,10 @@ function showSupabaseInsertError(error: unknown) {
 }
 
 export function ExpensesProvider({ children }: { children: ReactNode }) {
-  const { mergeBudgetOnExpenseCategoryDeleted } = useBudgets();
+  const {
+    mergeBudgetOnExpenseCategoryDeleted,
+    clearAllUserData: clearAllBudgetData,
+  } = useBudgets();
   const { user, profile, session, loading: authLoading } = useAuth();
   const householdId = normalizeHouseholdCode(profile?.household_id ?? "");
   const latestCategoryListsRef = useRef({
@@ -768,6 +815,16 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
   const [quickAccessCount, setQuickAccessCountState] = useState<number>(() =>
     normalizeCategoryDisplayLimit(profile?.category_display_limit),
   );
+  const starterPackSeedGuardRef = useRef<string>("");
+  const previousHouseholdIdRef = useRef<string>("");
+  const isHouseholdTransitioningRef = useRef(false);
+  const isDeletingRef = useRef(false);
+  // Blocks the category-sync effect for one render cycle after a Supabase fetch
+  // resolves. Set to true before the setState calls inside fetchCategoriesFromSupabase,
+  // cleared by a setTimeout(0) so it lives exactly until React has committed the
+  // fetch result — preventing fetched rows from being pushed straight back up.
+  const isCategoryFetchFlushingRef = useRef(false);
+  const [householdReloadToken, setHouseholdReloadToken] = useState(0);
 
   const waitForCloudContext = useCallback(async () => {
     // On wake-up, auth/profile can lag briefly; wait before writing.
@@ -789,34 +846,228 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
     return null;
   }, [authLoading, profile?.household_id, session, user?.id]);
 
-  useEffect(() => {
-    async function loadHouseholdExpenses() {
-      if (authLoading || !session || !user?.id) {
-        return;
-      }
-      if (!isValidHouseholdCode(householdId)) {
-        return;
-      }
-      try {
-        const { data, error } = await supabase
-          .from("expenses")
-          .select(
+  const fetchExpensesFromSupabase = useCallback(async () => {
+    if (authLoading || !session || !user?.id) return;
+    if (!isValidHouseholdCode(householdId)) return;
+    try {
+      const { data, error } = await supabase
+        .from("expenses")
+        .select(
           "id, user_id, household_id, amount, category, category_id, date, note, currency, is_verified, is_reviewed, installments_info, is_recurring, entry_type, payment_method_id, receipt_urls",
-          )
-          .eq("household_id", householdId)
-          .order("date", { ascending: false });
-        if (error) return;
-        if (!data) return;
-        const mapped = (data as SupabaseExpenseRow[])
-          .map(mapDbExpenseToApp)
-          .filter(isValidExpenseShape);
-        setExpenses(dedupeExpenseRows(mapped));
-      } catch {
-        /* ignore load failures; user can retry by navigating */
-      }
+        )
+        .eq("household_id", householdId)
+        .order("date", { ascending: false });
+      if (error || !data) return;
+      const mapped = (data as SupabaseExpenseRow[])
+        .map(mapDbExpenseToApp)
+        .filter(isValidExpenseShape);
+      setExpenses(dedupeExpenseRows(mapped));
+    } catch {
+      /* ignore load failures; user can retry by navigating */
     }
-    void loadHouseholdExpenses();
   }, [authLoading, householdId, session, user?.id]);
+
+  const fetchCategoriesFromSupabase = useCallback(async () => {
+    if (authLoading || !session || !user?.id) return;
+    const hm = normalizeHouseholdCode(profile?.household_id ?? "");
+    if (!isValidHouseholdCode(hm)) {
+      setCustomExpenseCategories([]);
+      setCustomIncomeSources([]);
+      return;
+    }
+    const q = supabase.from("categories").select("id,name,color,icon,type").eq("household_id", hm);
+    const { data, error } = await q;
+    if (error || !Array.isArray(data)) return;
+    const expenseRows = data
+      .filter((r) => String((r as { type?: unknown }).type ?? "") === "expense")
+      .map((r) => ({
+        id: String((r as { id?: unknown }).id ?? ""),
+        name: String((r as { name?: unknown }).name ?? ""),
+        color: String((r as { color?: unknown }).color ?? "#737373"),
+        iconKey: normalizeCategoryIconKey((r as { icon?: unknown }).icon, "tag"),
+      }))
+      .filter((r) => r.id && r.name);
+    const incomeRows = data
+      .filter((r) => String((r as { type?: unknown }).type ?? "") === "income")
+      .map((r) => ({
+        id: String((r as { id?: unknown }).id ?? ""),
+        name: String((r as { name?: unknown }).name ?? ""),
+        color: String((r as { color?: unknown }).color ?? "#737373"),
+        iconKey: normalizeCategoryIconKey((r as { icon?: unknown }).icon, "tag"),
+      }))
+      .filter((r) => r.id && r.name);
+    const expenseCustom = expenseRows.filter((r) => !MOCK_CATEGORIES.some((b) => b.id === r.id));
+    const incomeCustom = incomeRows.filter((r) => !MOCK_INCOME_SOURCES.some((b) => b.id === r.id));
+    // Lock the sync effect for exactly one render cycle so that the freshly-fetched
+    // rows cannot be pushed straight back to Supabase with the wrong user_id.
+    // setTimeout(0) fires after React commits the re-render triggered by the two
+    // setState calls below, guaranteeing the sync effect is skipped for that render.
+    isCategoryFetchFlushingRef.current = true;
+    setCustomExpenseCategories(
+      dedupeCategoriesByName(
+        expenseCustom.map(({ id, name, color, iconKey }) => ({ id, name, color, iconKey })),
+      ),
+    );
+    setCustomIncomeSources(
+      dedupeCategoriesByName(
+        incomeCustom.map(({ id, name, color, iconKey }) => ({ id, name, color, iconKey })),
+      ),
+    );
+    setTimeout(() => {
+      isCategoryFetchFlushingRef.current = false;
+    }, 0);
+  }, [authLoading, profile?.household_id, session, user?.id]);
+
+  useEffect(() => {
+    void fetchExpensesFromSupabase();
+  }, [fetchExpensesFromSupabase, householdReloadToken]);
+
+  useEffect(() => {
+    void fetchCategoriesFromSupabase();
+  }, [fetchCategoriesFromSupabase, householdReloadToken]);
+
+  useEffect(() => {
+    if (authLoading || !session || !user?.id) return;
+    const nextHouseholdId = normalizeHouseholdCode(profile?.household_id ?? "");
+    if (!isValidHouseholdCode(nextHouseholdId)) return;
+    const prev = previousHouseholdIdRef.current;
+    if (!prev) {
+      previousHouseholdIdRef.current = nextHouseholdId;
+      // First mount: localStorage may hold stale categories from a previous session
+      // or a different household. Lock the sync effect immediately (this effect runs
+      // before the sync effect in definition order) so the stale data cannot be
+      // pushed to Supabase. Wipe in-memory state, then release the lock only after
+      // a fresh Supabase fetch has resolved.
+      isHouseholdTransitioningRef.current = true;
+      isCategoryFetchFlushingRef.current = true;
+      setExpenses([]);
+      setCustomExpenseCategories([]);
+      setCustomIncomeSources([]);
+      latestCategoryListsRef.current = { expenseCategories: [], incomeSources: [] };
+      try {
+        removeExpandyAppDataKeys();
+      } catch { /* ignore */ }
+      // The fetch effects at lines 888-894 have already started their own copies of
+      // these fetches. We run a second pair here purely to get a Promise we can track
+      // so we know exactly when it is safe to release the lock.
+      void Promise.all([fetchCategoriesFromSupabase(), fetchExpensesFromSupabase()]).finally(() => {
+        isHouseholdTransitioningRef.current = false;
+        // isCategoryFetchFlushingRef is released by the setTimeout(0) inside
+        // fetchCategoriesFromSupabase — no need to clear it here.
+      });
+      return;
+    }
+    if (prev === nextHouseholdId) return;
+
+    isHouseholdTransitioningRef.current = true;
+    setExpenses([]);
+    setCustomIncomeSources([]);
+    setCustomDestinationAccounts([]);
+    setCustomPaymentMethods([]);
+    setCustomExpenseCategories([]);
+    setCustomCurrencies([]);
+    setExpenseCategoryOverrides({});
+    setIncomeCategoryOverrides({});
+    setPaymentMethodOverrides({});
+    setDestinationAccountOverrides({});
+    setRecurringIncomeSkips({});
+    setDeletedBuiltinExpenseCategoryIds(new Set());
+    setDeletedBuiltinIncomeSourceIds(new Set());
+    setDeletedBuiltinPaymentMethodIds(new Set());
+    setDeletedBuiltinDestinationAccountIds(new Set());
+    setExpenseCategoryOrder([]);
+    setIncomeCategoryOrder([]);
+    latestCategoryListsRef.current = {
+      expenseCategories: [],
+      incomeSources: [],
+    };
+
+    starterPackSeedGuardRef.current = "";
+    previousHouseholdIdRef.current = nextHouseholdId;
+    try {
+      removeExpandyAppDataKeys();
+      localStorage.removeItem(STORAGE_DELETED_BUILTIN_EXPENSE_CATS);
+      localStorage.removeItem(STORAGE_DELETED_BUILTIN_INCOME_CATS);
+      localStorage.removeItem(STORAGE_EXPENSE_CATEGORY_ORDER);
+      localStorage.removeItem(STORAGE_INCOME_CATEGORY_ORDER);
+    } catch {
+      /* ignore */
+    }
+
+    // Safety purge for client-side databases if any are used by plugins.
+    try {
+      const idbWithList = indexedDB as unknown as { databases?: () => Promise<Array<{ name?: string }>> };
+      if (typeof idbWithList.databases === "function") {
+        void idbWithList.databases().then((dbs) => {
+          for (const db of dbs) {
+            const n = db?.name ?? "";
+            if (n.toLowerCase().includes("expandy")) indexedDB.deleteDatabase(n);
+          }
+        });
+      }
+    } catch {
+      /* ignore */
+    }
+
+    void Promise.all([fetchCategoriesFromSupabase(), fetchExpensesFromSupabase()]).finally(() => {
+      isHouseholdTransitioningRef.current = false;
+      setHouseholdReloadToken((x) => x + 1);
+    });
+  }, [
+    authLoading,
+    fetchCategoriesFromSupabase,
+    fetchExpensesFromSupabase,
+    profile?.household_id,
+    session,
+    user?.id,
+  ]);
+
+  useEffect(() => {
+    if (authLoading) return;
+    const activeUserId = user?.id ?? "";
+    try {
+      const prevUserId = localStorage.getItem(STORAGE_ACTIVE_AUTH_USER) ?? "";
+      if (!activeUserId) {
+        if (prevUserId) localStorage.removeItem(STORAGE_ACTIVE_AUTH_USER);
+        return;
+      }
+
+      // Different auth user on same browser: clear local app cache to prevent
+      // stale IDs (including category IDs) leaking across accounts.
+      if (prevUserId && prevUserId !== activeUserId) {
+        removeExpandyAppDataKeys();
+        localStorage.removeItem(STORAGE_DELETED_BUILTIN_EXPENSE_CATS);
+        localStorage.removeItem(STORAGE_DELETED_BUILTIN_INCOME_CATS);
+        localStorage.removeItem(STORAGE_EXPENSE_CATEGORY_ORDER);
+        localStorage.removeItem(STORAGE_INCOME_CATEGORY_ORDER);
+        setExpenses([]);
+        setCustomIncomeSources([]);
+        setCustomDestinationAccounts([]);
+        setCustomPaymentMethods([]);
+        setCustomExpenseCategories([]);
+        setCustomCurrencies([]);
+        setExpenseCategoryOverrides({});
+        setIncomeCategoryOverrides({});
+        setPaymentMethodOverrides({});
+        setDestinationAccountOverrides({});
+        setRecurringIncomeSkips({});
+        setDeletedBuiltinExpenseCategoryIds(new Set());
+        setDeletedBuiltinIncomeSourceIds(new Set());
+        setDeletedBuiltinPaymentMethodIds(new Set());
+        setDeletedBuiltinDestinationAccountIds(new Set());
+        setExpenseCategoryOrder([]);
+        setIncomeCategoryOrder([]);
+        latestCategoryListsRef.current = {
+          expenseCategories: [],
+          incomeSources: [],
+        };
+      }
+
+      localStorage.setItem(STORAGE_ACTIVE_AUTH_USER, activeUserId);
+    } catch {
+      // Ignore localStorage failures; cloud state still loads.
+    }
+  }, [authLoading, user?.id]);
 
   useEffect(() => {
     setPrefsCloudReady(false);
@@ -1133,64 +1384,21 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
   }, [authLoading, profile?.id, profile?.category_display_limit]);
 
 
-  useEffect(() => {
-    async function loadCategoriesFromSupabase() {
-      if (authLoading || !session || !user?.id) return;
-      const hm = normalizeHouseholdCode(profile?.household_id ?? "");
-      let q = supabase.from("categories").select("id,name,color,icon,type");
-      if (isValidHouseholdCode(hm)) {
-        q = q.eq("household_id", hm);
-      } else {
-        q = q.eq("user_id", user.id);
-      }
-      const { data, error } = await q;
-      if (error || !Array.isArray(data)) return;
-      const expenseRows = data
-        .filter((r) => String((r as { type?: unknown }).type ?? "") === "expense")
-        .map((r) => ({
-          id: String((r as { id?: unknown }).id ?? ""),
-          name: String((r as { name?: unknown }).name ?? ""),
-          color: String((r as { color?: unknown }).color ?? "#737373"),
-          iconKey: normalizeCategoryIconKey((r as { icon?: unknown }).icon, "tag"),
-        }))
-        .filter((r) => r.id && r.name);
-      const incomeRows = data
-        .filter((r) => String((r as { type?: unknown }).type ?? "") === "income")
-        .map((r) => ({
-          id: String((r as { id?: unknown }).id ?? ""),
-          name: String((r as { name?: unknown }).name ?? ""),
-          color: String((r as { color?: unknown }).color ?? "#737373"),
-          iconKey: normalizeCategoryIconKey((r as { icon?: unknown }).icon, "tag"),
-        }))
-        .filter((r) => r.id && r.name);
-
-      const expenseCustom = expenseRows.filter((r) => !MOCK_CATEGORIES.some((b) => b.id === r.id));
-      const incomeCustom = incomeRows.filter((r) => !MOCK_INCOME_SOURCES.some((b) => b.id === r.id));
-      setCustomExpenseCategories(
-        dedupeCategoriesByName(
-          expenseCustom.map(({ id, name, color, iconKey }) => ({
-            id,
-            name,
-            color,
-            iconKey,
-          })),
-        ),
-      );
-      setCustomIncomeSources(
-        dedupeCategoriesByName(
-          incomeCustom.map(({ id, name, color, iconKey }) => ({
-            id,
-            name,
-            color,
-            iconKey,
-          })),
-        ),
-      );
-    }
-    void loadCategoriesFromSupabase();
-  }, [authLoading, session, user?.id, householdId, profile?.household_id]);
+  // Reactive Starter Pack seeding has been intentionally removed.
+  // Seeding categories reactively when categories.length === 0 is unsafe: it fires
+  // during household transitions, on every new login, and when the host deliberately
+  // has zero categories. Seeding must only happen explicitly during new-user onboarding
+  // (auth flow), never as a side-effect inside the context.
   useEffect(() => {
     if (authLoading || !session || !user?.id || !isValidHouseholdCode(householdId)) return;
+    // Guard 1: household transition in progress — never push during a household switch.
+    if (isHouseholdTransitioningRef.current) return;
+    // Guard 2: fetchCategoriesFromSupabase just resolved and set state — skip this render
+    // so we don't push fetched host categories back up with the wrong user_id.
+    if (isCategoryFetchFlushingRef.current) return;
+    // Guard 3: manual category deletion in progress — avoid re-upserting stale rows
+    // during the deletion window and the immediate next render after local state updates.
+    if (isDeletingRef.current) return;
     const rawRows: CategoryUpsertRow[] = [
       ...expenseCategoriesForStorage
         .filter((c) => isStandardUuid(c.id))
@@ -2453,6 +2661,34 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
           return next;
         });
       } else {
+        if (isValidHouseholdCode(householdId) && isStandardUuid(id)) {
+          isDeletingRef.current = true;
+          void (async () => {
+            const { error } = await deleteCategoryFromSupabase(householdId, id);
+            if (error) {
+              console.error("[ExpensesContext] category delete failed", error);
+              const msg = supabaseErrorMessage(error);
+              toast.error(msg || "מחיקת קטגוריה נכשלה");
+              isDeletingRef.current = false;
+              return;
+            }
+            // DB-first delete: only after backend success do we mutate local state.
+            setCustomExpenseCategories((prev) => prev.filter((c) => c.id !== id));
+            if (moveToCategoryId && moveToCategoryId !== id) {
+              setExpenses((prev) =>
+                prev.map((e) =>
+                  e.categoryId === id ? { ...e, categoryId: moveToCategoryId } : e,
+                ),
+              );
+            }
+            mergeBudgetOnExpenseCategoryDeleted(id, moveToCategoryId);
+            setExpenseCategoryOrder((prev) => prev.filter((x) => x !== id));
+            setTimeout(() => {
+              isDeletingRef.current = false;
+            }, 0);
+          })();
+          return;
+        }
         setCustomExpenseCategories((prev) => prev.filter((c) => c.id !== id));
       }
       if (moveToCategoryId && moveToCategoryId !== id) {
@@ -2463,12 +2699,9 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
         );
       }
       mergeBudgetOnExpenseCategoryDeleted(id, moveToCategoryId);
-      if (!isBuiltin && isValidHouseholdCode(householdId)) {
-        scheduleDeleteCategoryFromSupabase(householdId, id);
-      }
       setExpenseCategoryOrder((prev) => prev.filter((x) => x !== id));
     },
-    [householdId, mergeBudgetOnExpenseCategoryDeleted, user?.id],
+    [householdId, mergeBudgetOnExpenseCategoryDeleted],
   );
 
   const reorderExpenseCategories = useCallback((orderedIds: string[]) => {
@@ -2552,6 +2785,35 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
           return next;
         });
       } else {
+        if (isValidHouseholdCode(householdId) && isStandardUuid(id)) {
+          isDeletingRef.current = true;
+          void (async () => {
+            const { error } = await deleteCategoryFromSupabase(householdId, id);
+            if (error) {
+              console.error("[ExpensesContext] income source delete failed", error);
+              const msg = supabaseErrorMessage(error);
+              toast.error(msg || "מחיקת מקור הכנסה נכשלה");
+              isDeletingRef.current = false;
+              return;
+            }
+            // DB-first delete: only after backend success do we mutate local state.
+            setCustomIncomeSources((prev) => prev.filter((c) => c.id !== id));
+            if (moveToIncomeSourceId && moveToIncomeSourceId !== id) {
+              setExpenses((prev) =>
+                prev.map((e) =>
+                  e.type === "income" && e.categoryId === id
+                    ? { ...e, categoryId: moveToIncomeSourceId }
+                    : e,
+                ),
+              );
+            }
+            setIncomeCategoryOrder((prev) => prev.filter((x) => x !== id));
+            setTimeout(() => {
+              isDeletingRef.current = false;
+            }, 0);
+          })();
+          return;
+        }
         setCustomIncomeSources((prev) => prev.filter((c) => c.id !== id));
       }
       if (moveToIncomeSourceId && moveToIncomeSourceId !== id) {
@@ -2563,12 +2825,9 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
           ),
         );
       }
-      if (!isBuiltin && isValidHouseholdCode(householdId)) {
-        scheduleDeleteCategoryFromSupabase(householdId, id);
-      }
       setIncomeCategoryOrder((prev) => prev.filter((x) => x !== id));
     },
-    [householdId, user?.id],
+    [householdId],
   );
 
   const reorderIncomeSources = useCallback((orderedIds: string[]) => {
@@ -2902,6 +3161,100 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
     removeExpandyAppDataKeys();
   }, [householdId, user?.id]);
 
+  const resetLocalState = useCallback(() => {
+    setExpenses([]);
+    setCustomIncomeSources([]);
+    setCustomDestinationAccounts([]);
+    setCustomPaymentMethods([]);
+    setCustomExpenseCategories([]);
+    setCustomCurrencies([]);
+    setExpenseCategoryOverrides({});
+    setIncomeCategoryOverrides({});
+    setPaymentMethodOverrides({});
+    setDestinationAccountOverrides({});
+    setRecurringIncomeSkips({});
+    setDeletedBuiltinExpenseCategoryIds(new Set());
+    setDeletedBuiltinIncomeSourceIds(new Set());
+    setDeletedBuiltinPaymentMethodIds(new Set());
+    setDeletedBuiltinDestinationAccountIds(new Set());
+    setExpenseCategoryOrder([]);
+    setIncomeCategoryOrder([]);
+    latestCategoryListsRef.current = {
+      expenseCategories: [],
+      incomeSources: [],
+    };
+    // Keep budget state in sync with category/expense wipes during transitions.
+    clearAllBudgetData();
+  }, [clearAllBudgetData]);
+
+  /**
+   * Sets the sync + fetch-flush locks, wipes all local React state, and
+   * aggressively purges localStorage / IndexedDB. Call this synchronously
+   * before any Supabase write that moves the user to a new household so the
+   * reactive sync effect is blocked for the entire transition window.
+   *
+   * The household-change useEffect releases the lock automatically after the
+   * next Supabase fetch completes (triggered by refreshProfile()).
+   */
+  const beginHouseholdTransition = useCallback(() => {
+    isHouseholdTransitioningRef.current = true;
+    isCategoryFetchFlushingRef.current = true;
+    starterPackSeedGuardRef.current = "";
+    resetLocalState();
+    // Purge persistent caches so nothing stale can survive a page reload.
+    try {
+      removeExpandyAppDataKeys();
+      localStorage.removeItem(BUDGET_LOCAL_STORAGE_KEY);
+      if (isValidHouseholdCode(householdId)) {
+        localStorage.removeItem(`${BUDGET_LOCAL_STORAGE_KEY}__${householdId}`);
+      }
+      localStorage.removeItem(STORAGE_DELETED_BUILTIN_EXPENSE_CATS);
+      localStorage.removeItem(STORAGE_DELETED_BUILTIN_INCOME_CATS);
+      localStorage.removeItem(STORAGE_EXPENSE_CATEGORY_ORDER);
+      localStorage.removeItem(STORAGE_INCOME_CATEGORY_ORDER);
+    } catch { /* ignore */ }
+    try {
+      const idbWithList = indexedDB as unknown as {
+        databases?: () => Promise<Array<{ name?: string }>>;
+      };
+      if (typeof idbWithList.databases === "function") {
+        void idbWithList.databases().then((dbs) => {
+          for (const db of dbs) {
+            const n = db?.name ?? "";
+            if (n.toLowerCase().includes("expandy")) indexedDB.deleteDatabase(n);
+          }
+        });
+      }
+    } catch { /* ignore */ }
+  }, [householdId, resetLocalState]);
+
+  /**
+   * Inserts 5 default "Starter Pack" expense categories for the given user and
+   * household. Every call generates fresh UUIDs — never reuses hardcoded IDs.
+   * Must only be called during the explicit "Leave → Fresh slate" flow.
+   */
+  const seedStarterPack = useCallback(
+    async (
+      forUserId: string,
+      forHouseholdId: string,
+    ): Promise<{ ok: boolean; error?: unknown }> => {
+      const rows = DEFAULT_STARTER_CATEGORIES.map((c) =>
+        categoryToSupabaseRow(
+          { id: newId(), name: c.name, color: c.color, iconKey: c.iconKey },
+          forUserId,
+          "expense",
+          forHouseholdId,
+        ),
+      );
+      const { error } = await upsertCategoriesToSupabase(
+        dedupeCategoryUpsertRows(rows),
+      );
+      if (error) return { ok: false, error };
+      return { ok: true };
+    },
+    [],
+  );
+
   const value = useMemo(
     () => ({
       expenses,
@@ -2944,6 +3297,9 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
       skipRecurringIncomePayment,
       stopRecurringIncome,
       clearAllUserData,
+      resetLocalState,
+      beginHouseholdTransition,
+      seedStarterPack,
     }),
     [
       expenses,
@@ -2986,6 +3342,9 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
       skipRecurringIncomePayment,
       stopRecurringIncome,
       clearAllUserData,
+      resetLocalState,
+      beginHouseholdTransition,
+      seedStarterPack,
     ],
   );
 

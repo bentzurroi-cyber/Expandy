@@ -5,6 +5,7 @@ import {
   Download,
   Eye,
   Lightbulb,
+  Loader2,
   Pencil,
   Trash2,
 } from "lucide-react";
@@ -202,6 +203,8 @@ export function SettingsView() {
     addDestinationAccount,
     addPaymentMethod,
     clearAllUserData: clearExpensesData,
+    beginHouseholdTransition,
+    seedStarterPack,
     updateExpenseCategory,
     deleteExpenseCategory,
     reorderExpenseCategories,
@@ -313,6 +316,7 @@ export function SettingsView() {
   const [incomingJoinLoading, setIncomingJoinLoading] = useState(false);
   const [reviewJoinRequest, setReviewJoinRequest] = useState<HouseholdJoinRequestRow | null>(null);
   const [joinReviewActionLoading, setJoinReviewActionLoading] = useState(false);
+  const approveJoinInFlightRef = useRef(false);
   const [outgoingJoinPending, setOutgoingJoinPending] = useState<
     { id: string; household_code: string }[]
   >([]);
@@ -912,20 +916,22 @@ export function SettingsView() {
   }
 
   async function approveJoinRequest(request: HouseholdJoinRequestRow) {
+    if (approveJoinInFlightRef.current || joinReviewActionLoading) return;
+    approveJoinInFlightRef.current = true;
     setJoinReviewActionLoading(true);
     try {
       const { data, error } = await supabase.rpc("approve_household_join_request", {
         p_request_id: request.id,
       });
       if (error) {
-        toast.error(`${t.householdJoinApproveFailed}: ${error.message}`);
+        console.error("Supabase RPC Error:", error);
+        toast.error(error.message || "Approve join RPC failed");
         return;
       }
       const res = data as { ok?: boolean; error?: string } | null;
       if (!res?.ok) {
-        toast.error(
-          `${t.householdJoinApproveFailed}${res?.error ? `: ${res.error}` : ""}`,
-        );
+        console.error("Supabase RPC Error:", res);
+        toast.error(res?.error || "Approve join RPC returned failure");
         return;
       }
       setReviewJoinRequest(null);
@@ -934,6 +940,7 @@ export function SettingsView() {
       toast.success(t.householdJoinApprovedToast);
       window.location.reload();
     } finally {
+      approveJoinInFlightRef.current = false;
       setJoinReviewActionLoading(false);
     }
   }
@@ -1014,6 +1021,7 @@ export function SettingsView() {
       }
 
       const newCode = await allocateNewHouseholdCode(user.id);
+
       if (mode === "take-data") {
         if (oldHouseholdId && oldHouseholdId !== newCode) {
           const { error: migrateMineError } = await supabase
@@ -1042,10 +1050,33 @@ export function SettingsView() {
         return;
       }
 
+      // STEP 1 — Imperatively lock the sync effect and wipe all local cache
+      // BEFORE refreshProfile() causes profile.household_id to change. This
+      // guarantees the reactive sync never fires with stale data between now and
+      // when the household-change useEffect runs and takes over.
+      beginHouseholdTransition();
+
+      // STEP 2 — For "fresh" mode: seed 5 default categories into Supabase for
+      // the brand-new household BEFORE refreshProfile() triggers the fetch. The
+      // fetch will then find these rows and load them into state. This is the
+      // ONLY place where default categories are ever created — never reactively.
+      if (mode === "fresh") {
+        const { ok, error: seedErr } = await seedStarterPack(user.id, newCode);
+        if (!ok) {
+          // Non-fatal: user can create categories manually. Log and continue.
+          console.error("[Settings] seedStarterPack failed", seedErr);
+        }
+      }
+
+      // STEP 3 — Clean up the old (now empty) household row if appropriate.
       if (canDeleteEmptyHouseholdRow) {
         await supabase.from("households").delete().eq("code", oldHouseholdId);
       }
 
+      // STEP 4 — Refresh profile; this changes profile.household_id which
+      // triggers the household-change useEffect in ExpensesContext. That effect
+      // will fetch from newCode (finding the seeded categories if fresh mode)
+      // and release isHouseholdTransitioningRef when done.
       setDisplayHouseholdCode(newCode);
       await refreshProfile();
       setLeaveConfirmOpen(false);
@@ -2605,7 +2636,7 @@ export function SettingsView() {
                     ? t.householdJoinReviewMergeHint
                     : t.householdJoinReviewReplaceHint}
                 </p>
-                {reviewJoinRequest ? (
+                {reviewJoinRequest?.import_previous_data ? (
                   <div className="space-y-1">
                     <p className="font-medium text-foreground">{t.householdJoinCategoryPreview}</p>
                     <ul className="max-h-40 space-y-1 overflow-y-auto rounded-md border border-border/50 px-2 py-2 text-xs">
@@ -2647,7 +2678,14 @@ export function SettingsView() {
                   if (reviewJoinRequest) void approveJoinRequest(reviewJoinRequest);
                 }}
               >
-                {t.householdJoinApprove}
+                {joinReviewActionLoading ? (
+                  <span className="inline-flex items-center gap-2">
+                    <Loader2 className="size-4 animate-spin text-current/80" aria-hidden />
+                    <span>{lang === "he" ? "מאשר..." : "Approving..."}</span>
+                  </span>
+                ) : (
+                  t.householdJoinApprove
+                )}
               </Button>
             </div>
           </AlertDialogFooter>
