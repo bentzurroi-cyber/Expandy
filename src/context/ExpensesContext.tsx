@@ -3,6 +3,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -50,6 +51,10 @@ import {
   EXPANDY_APP_DATA_STORAGE_KEYS,
   removeExpandyAppDataKeys,
 } from "@/lib/expandy-storage";
+import {
+  readDataEntryLayoutCache,
+  writeDataEntryLayoutCache,
+} from "@/lib/dataEntryLayoutCache";
 import { isValidHouseholdCode, normalizeHouseholdCode } from "@/lib/household";
 import {
   isStandardUuid,
@@ -133,9 +138,72 @@ const STORAGE_CUSTOM_CURRENCIES = "expandy-currencies-v1";
 const STORAGE_PAYMENT_METHODS = "expandy-payment-methods-v1";
 const STORAGE_DELETED_BUILTIN_EXPENSE_CATS = "expandy-deleted-builtin-expense-cats-v1";
 const STORAGE_DELETED_BUILTIN_INCOME_CATS = "expandy-deleted-builtin-income-cats-v1";
-const STORAGE_EXPENSE_CATEGORY_ORDER = "expandy-expense-category-order-v1";
-const STORAGE_INCOME_CATEGORY_ORDER = "expandy-income-category-order-v1";
 const STORAGE_ACTIVE_AUTH_USER = "expandy-active-auth-user-v1";
+
+type DataEntryLayoutBucket = { expense: string[]; income: string[] };
+
+/** Parse `profiles.app_state.data_entry_category_layout_by_hh` (per-household layout). */
+function parseDataEntryLayoutByHousehold(
+  raw: unknown,
+): Record<string, DataEntryLayoutBucket> {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const out: Record<string, DataEntryLayoutBucket> = {};
+  for (const [hk, v] of Object.entries(raw as Record<string, unknown>)) {
+    const key = normalizeHouseholdCode(hk);
+    if (!isValidHouseholdCode(key)) continue;
+    if (!v || typeof v !== "object" || Array.isArray(v)) continue;
+    const vo = v as Record<string, unknown>;
+    const expense = Array.isArray(vo.expense)
+      ? vo.expense.filter((x): x is string => typeof x === "string")
+      : [];
+    const income = Array.isArray(vo.income)
+      ? vo.income.filter((x): x is string => typeof x === "string")
+      : [];
+    out[key] = { expense, income };
+  }
+  return out;
+}
+
+/** Keep saved order for ids that still exist; append any new ids at end (stable name sort). */
+function mergeSavedCategoryOrder(saved: string[], currentIds: string[]): string[] {
+  const allowed = new Set(currentIds);
+  const ordered: string[] = [];
+  for (const id of saved) {
+    if (allowed.has(id)) ordered.push(id);
+  }
+  const missing = currentIds.filter((id) => !ordered.includes(id));
+  missing.sort((a, b) => a.localeCompare(b, "he"));
+  return [...ordered, ...missing];
+}
+
+/** Apply cached / saved id order to DB-fetched custom category rows (no DB order column). */
+function sortCustomCategoryRowsByOrder<
+  T extends { id: string; name: string; color: string; iconKey: string },
+>(rows: T[], order: string[]): T[] {
+  const ids = rows.map((r) => r.id);
+  const merged = mergeSavedCategoryOrder(order, ids);
+  const m = new Map(rows.map((r) => [r.id, r] as const));
+  return merged.map((id) => m.get(id)).filter((x): x is T => x != null);
+}
+
+function sameIdOrder(a: string[], b: string[]): boolean {
+  return a.length === b.length && a.every((id, i) => id === b[i]);
+}
+
+const LEGACY_STORAGE_EXPENSE_CATEGORY_ORDER = "expandy-expense-category-order-v1";
+const LEGACY_STORAGE_INCOME_CATEGORY_ORDER = "expandy-income-category-order-v1";
+
+function readLegacyCategoryOrderFromLocalStorage(key: string): string[] {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((x): x is string => typeof x === "string");
+  } catch {
+    return [];
+  }
+}
 
 function readDeletedBuiltinIds(key: string): Set<string> {
   try {
@@ -164,31 +232,6 @@ function deletedBuiltinListsDiffer(a: string[], b: string[]): boolean {
   const bs = new Set(b);
   return a.some((id) => !bs.has(id));
 }
-
-function readExpenseCategoryOrder(): string[] {
-  try {
-    const raw = localStorage.getItem(STORAGE_EXPENSE_CATEGORY_ORDER);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw) as unknown;
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter((x): x is string => typeof x === "string");
-  } catch {
-    return [];
-  }
-}
-
-function readIncomeCategoryOrder(): string[] {
-  try {
-    const raw = localStorage.getItem(STORAGE_INCOME_CATEGORY_ORDER);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw) as unknown;
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter((x): x is string => typeof x === "string");
-  } catch {
-    return [];
-  }
-}
-
 
 function isValidExpenseShape(row: unknown): row is Expense {
   if (!row || typeof row !== "object") return false;
@@ -806,15 +849,29 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
   >(new Set());
   const [deletedBuiltinDestinationAccountIds, setDeletedBuiltinDestinationAccountIds] =
     useState<Set<string>>(new Set());
-  const [expenseCategoryOrder, setExpenseCategoryOrder] = useState<string[]>(
-    () => readExpenseCategoryOrder(),
-  );
-  const [incomeCategoryOrder, setIncomeCategoryOrder] = useState<string[]>(
-    () => readIncomeCategoryOrder(),
-  );
-  const [quickAccessCount, setQuickAccessCountState] = useState<number>(() =>
-    normalizeCategoryDisplayLimit(profile?.category_display_limit),
-  );
+  const [expenseCategoryOrder, setExpenseCategoryOrder] = useState<string[]>([]);
+  const [incomeCategoryOrder, setIncomeCategoryOrder] = useState<string[]>([]);
+  const expenseCategoryOrderRef = useRef<string[]>([]);
+  const incomeCategoryOrderRef = useRef<string[]>([]);
+  expenseCategoryOrderRef.current = expenseCategoryOrder;
+  incomeCategoryOrderRef.current = incomeCategoryOrder;
+  const [quickAccessCount, setQuickAccessCountState] = useState<number>(() => {
+    const fromProfile = profile?.category_display_limit;
+    if (typeof fromProfile === "number" && Number.isFinite(fromProfile)) {
+      return normalizeCategoryDisplayLimit(fromProfile);
+    }
+    const uid = user?.id?.trim();
+    const hh = normalizeHouseholdCode(profile?.household_id ?? "");
+    if (uid && isValidHouseholdCode(hh)) {
+      const cached = readDataEntryLayoutCache(uid, hh);
+      if (cached.categoryDisplayLimit != null) {
+        return normalizeCategoryDisplayLimit(cached.categoryDisplayLimit);
+      }
+    }
+    return 8;
+  });
+  const quickAccessCountRef = useRef(quickAccessCount);
+  quickAccessCountRef.current = quickAccessCount;
   const starterPackSeedGuardRef = useRef<string>("");
   const previousHouseholdIdRef = useRef<string>("");
   const isHouseholdTransitioningRef = useRef(false);
@@ -825,6 +882,20 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
   // fetch result — preventing fetched rows from being pushed straight back up.
   const isCategoryFetchFlushingRef = useRef(false);
   const [householdReloadToken, setHouseholdReloadToken] = useState(0);
+
+  // Apply last-known layout from localStorage before paint to avoid FOUC (DB / app_state lag).
+  useLayoutEffect(() => {
+    if (!user?.id || !isValidHouseholdCode(householdId)) return;
+    const c = readDataEntryLayoutCache(user.id, householdId);
+    setExpenseCategoryOrder(c.expense);
+    setIncomeCategoryOrder(c.income);
+    const profLim = profile?.category_display_limit;
+    const hasProfileLimit =
+      typeof profLim === "number" && Number.isFinite(profLim);
+    if (!hasProfileLimit && c.categoryDisplayLimit != null) {
+      setQuickAccessCountState(normalizeCategoryDisplayLimit(c.categoryDisplayLimit));
+    }
+  }, [user?.id, householdId, profile?.category_display_limit]);
 
   const waitForCloudContext = useCallback(async () => {
     // On wake-up, auth/profile can lag briefly; wait before writing.
@@ -898,25 +969,52 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
       .filter((r) => r.id && r.name);
     const expenseCustom = expenseRows.filter((r) => !MOCK_CATEGORIES.some((b) => b.id === r.id));
     const incomeCustom = incomeRows.filter((r) => !MOCK_INCOME_SOURCES.some((b) => b.id === r.id));
+    const cachedLayout =
+      user?.id && isValidHouseholdCode(hm) ? readDataEntryLayoutCache(user.id, hm) : null;
+    const sortedExpenseCustom = cachedLayout
+      ? sortCustomCategoryRowsByOrder(expenseCustom, cachedLayout.expense)
+      : expenseCustom;
+    const sortedIncomeCustom = cachedLayout
+      ? sortCustomCategoryRowsByOrder(incomeCustom, cachedLayout.income)
+      : incomeCustom;
+    const baseExpenseIds = MOCK_CATEGORIES.filter(
+      (c) => !deletedBuiltinExpenseCategoryIds.has(c.id),
+    ).map((c) => c.id);
+    const baseIncomeIds = MOCK_INCOME_SOURCES.filter(
+      (c) => !deletedBuiltinIncomeSourceIds.has(c.id),
+    ).map((c) => c.id);
+    const fullExpenseIds = [...baseExpenseIds, ...sortedExpenseCustom.map((r) => r.id)];
+    const fullIncomeIds = [...baseIncomeIds, ...sortedIncomeCustom.map((r) => r.id)];
+    const orderE = mergeSavedCategoryOrder(cachedLayout?.expense ?? [], fullExpenseIds);
+    const orderI = mergeSavedCategoryOrder(cachedLayout?.income ?? [], fullIncomeIds);
     // Lock the sync effect for exactly one render cycle so that the freshly-fetched
     // rows cannot be pushed straight back to Supabase with the wrong user_id.
     // setTimeout(0) fires after React commits the re-render triggered by the two
     // setState calls below, guaranteeing the sync effect is skipped for that render.
     isCategoryFetchFlushingRef.current = true;
+    setExpenseCategoryOrder(orderE);
+    setIncomeCategoryOrder(orderI);
     setCustomExpenseCategories(
       dedupeCategoriesByName(
-        expenseCustom.map(({ id, name, color, iconKey }) => ({ id, name, color, iconKey })),
+        sortedExpenseCustom.map(({ id, name, color, iconKey }) => ({ id, name, color, iconKey })),
       ),
     );
     setCustomIncomeSources(
       dedupeCategoriesByName(
-        incomeCustom.map(({ id, name, color, iconKey }) => ({ id, name, color, iconKey })),
+        sortedIncomeCustom.map(({ id, name, color, iconKey }) => ({ id, name, color, iconKey })),
       ),
     );
     setTimeout(() => {
       isCategoryFetchFlushingRef.current = false;
     }, 0);
-  }, [authLoading, profile?.household_id, session, user?.id]);
+  }, [
+    authLoading,
+    deletedBuiltinExpenseCategoryIds,
+    deletedBuiltinIncomeSourceIds,
+    profile?.household_id,
+    session,
+    user?.id,
+  ]);
 
   useEffect(() => {
     void fetchExpensesFromSupabase();
@@ -975,8 +1073,19 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
     setDeletedBuiltinIncomeSourceIds(new Set());
     setDeletedBuiltinPaymentMethodIds(new Set());
     setDeletedBuiltinDestinationAccountIds(new Set());
-    setExpenseCategoryOrder([]);
-    setIncomeCategoryOrder([]);
+    if (user?.id) {
+      const cached = readDataEntryLayoutCache(user.id, nextHouseholdId);
+      setExpenseCategoryOrder(cached.expense);
+      setIncomeCategoryOrder(cached.income);
+      if (cached.categoryDisplayLimit != null) {
+        setQuickAccessCountState(
+          normalizeCategoryDisplayLimit(cached.categoryDisplayLimit),
+        );
+      }
+    } else {
+      setExpenseCategoryOrder([]);
+      setIncomeCategoryOrder([]);
+    }
     latestCategoryListsRef.current = {
       expenseCategories: [],
       incomeSources: [],
@@ -988,8 +1097,6 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
       removeExpandyAppDataKeys();
       localStorage.removeItem(STORAGE_DELETED_BUILTIN_EXPENSE_CATS);
       localStorage.removeItem(STORAGE_DELETED_BUILTIN_INCOME_CATS);
-      localStorage.removeItem(STORAGE_EXPENSE_CATEGORY_ORDER);
-      localStorage.removeItem(STORAGE_INCOME_CATEGORY_ORDER);
     } catch {
       /* ignore */
     }
@@ -1038,8 +1145,6 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
         removeExpandyAppDataKeys();
         localStorage.removeItem(STORAGE_DELETED_BUILTIN_EXPENSE_CATS);
         localStorage.removeItem(STORAGE_DELETED_BUILTIN_INCOME_CATS);
-        localStorage.removeItem(STORAGE_EXPENSE_CATEGORY_ORDER);
-        localStorage.removeItem(STORAGE_INCOME_CATEGORY_ORDER);
         setExpenses([]);
         setCustomIncomeSources([]);
         setCustomDestinationAccounts([]);
@@ -1362,26 +1467,15 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
   }, [deletedBuiltinIncomeSourceIds]);
 
   useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_EXPENSE_CATEGORY_ORDER, JSON.stringify(expenseCategoryOrder));
-    } catch {
-      /* ignore */
-    }
-  }, [expenseCategoryOrder]);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_INCOME_CATEGORY_ORDER, JSON.stringify(incomeCategoryOrder));
-    } catch {
-      /* ignore */
-    }
-  }, [incomeCategoryOrder]);
-
-  useEffect(() => {
     if (authLoading || !profile) return;
     const normalized = normalizeCategoryDisplayLimit(profile.category_display_limit);
     setQuickAccessCountState((prev) => (prev === normalized ? prev : normalized));
-  }, [authLoading, profile?.id, profile?.category_display_limit]);
+    if (user?.id && isValidHouseholdCode(householdId)) {
+      writeDataEntryLayoutCache(user.id, householdId, {
+        categoryDisplayLimit: normalized,
+      });
+    }
+  }, [authLoading, householdId, profile?.category_display_limit, profile?.id, user?.id]);
 
 
   // Reactive Starter Pack seeding has been intentionally removed.
@@ -1618,6 +1712,103 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
     },
     [recurringIncomeSkips],
   );
+
+  const allExpenseCategoryIds = useMemo(() => {
+    const base = MOCK_CATEGORIES.filter(
+      (c) => !deletedBuiltinExpenseCategoryIds.has(c.id),
+    ).map((c) => c.id);
+    const custom = customExpenseCategories.map((c) => c.id);
+    return [...base, ...custom];
+  }, [customExpenseCategories, deletedBuiltinExpenseCategoryIds]);
+
+  const allIncomeCategoryIds = useMemo(() => {
+    const base = MOCK_INCOME_SOURCES.filter(
+      (c) => !deletedBuiltinIncomeSourceIds.has(c.id),
+    ).map((c) => c.id);
+    const custom = customIncomeSources.map((c) => c.id);
+    return [...base, ...custom];
+  }, [customIncomeSources, deletedBuiltinIncomeSourceIds]);
+
+  const expenseCategoryIdsKey = useMemo(
+    () => allExpenseCategoryIds.join("\u0001"),
+    [allExpenseCategoryIds],
+  );
+  const incomeCategoryIdsKey = useMemo(
+    () => allIncomeCategoryIds.join("\u0001"),
+    [allIncomeCategoryIds],
+  );
+
+  /** Data Entry (הזנה) layout: personal order per user, stored in `profiles.app_state` (by household). */
+  const persistDataEntryCategoryLayout = useCallback(
+    async (expenseOrd: string[], incomeOrd: string[]) => {
+      const uid = user?.id?.trim();
+      if (!uid || !isValidHouseholdCode(householdId)) return;
+      const app = await fetchProfileAppState(uid);
+      const key = APP_STATE_KEYS.dataEntryCategoryLayoutByHousehold;
+      const byHh = parseDataEntryLayoutByHousehold(app[key]);
+      byHh[householdId] = { expense: expenseOrd, income: incomeOrd };
+      const res = await patchProfileAppState(uid, { [key]: byHh });
+      if (!res.ok) {
+        console.error("[ExpensesContext] data entry layout persist failed", res.error);
+        return;
+      }
+      writeDataEntryLayoutCache(uid, householdId, {
+        expense: expenseOrd,
+        income: incomeOrd,
+        categoryDisplayLimit: quickAccessCountRef.current,
+      });
+    },
+    [user?.id, householdId],
+  );
+
+  useEffect(() => {
+    if (authLoading || !session || !user?.id || !isValidHouseholdCode(householdId)) return;
+    if (isHouseholdTransitioningRef.current) return;
+    let cancelled = false;
+    void (async () => {
+      const app = await fetchProfileAppState(user.id);
+      if (cancelled) return;
+      const byHh = parseDataEntryLayoutByHousehold(
+        app[APP_STATE_KEYS.dataEntryCategoryLayoutByHousehold],
+      );
+      let saved = byHh[householdId] ?? { expense: [], income: [] };
+      let migratedLegacyLayout = false;
+      if (!saved.expense.length && !saved.income.length) {
+        const legE = readLegacyCategoryOrderFromLocalStorage(LEGACY_STORAGE_EXPENSE_CATEGORY_ORDER);
+        const legI = readLegacyCategoryOrderFromLocalStorage(LEGACY_STORAGE_INCOME_CATEGORY_ORDER);
+        if (legE.length || legI.length) {
+          saved = { expense: legE, income: legI };
+          migratedLegacyLayout = true;
+        }
+      }
+      const nextE = mergeSavedCategoryOrder(saved.expense, allExpenseCategoryIds);
+      const nextI = mergeSavedCategoryOrder(saved.income, allIncomeCategoryIds);
+      setExpenseCategoryOrder((prev) => (sameIdOrder(prev, nextE) ? prev : nextE));
+      setIncomeCategoryOrder((prev) => (sameIdOrder(prev, nextI) ? prev : nextI));
+      if (cancelled) return;
+      writeDataEntryLayoutCache(user.id, householdId, {
+        expense: nextE,
+        income: nextI,
+        categoryDisplayLimit: quickAccessCountRef.current,
+      });
+      if (migratedLegacyLayout && !cancelled) {
+        void persistDataEntryCategoryLayout(nextE, nextI);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    authLoading,
+    session,
+    user?.id,
+    householdId,
+    expenseCategoryIdsKey,
+    incomeCategoryIdsKey,
+    allExpenseCategoryIds,
+    allIncomeCategoryIds,
+    persistDataEntryCategoryLayout,
+  ]);
 
   const expenseCategories = useMemo(() => {
     const apply = (c: Category): Category => {
@@ -2682,7 +2873,13 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
               );
             }
             mergeBudgetOnExpenseCategoryDeleted(id, moveToCategoryId);
-            setExpenseCategoryOrder((prev) => prev.filter((x) => x !== id));
+            setExpenseCategoryOrder((prev) => {
+              const next = prev.filter((x) => x !== id);
+              queueMicrotask(() =>
+                void persistDataEntryCategoryLayout(next, incomeCategoryOrderRef.current),
+              );
+              return next;
+            });
             setTimeout(() => {
               isDeletingRef.current = false;
             }, 0);
@@ -2699,14 +2896,35 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
         );
       }
       mergeBudgetOnExpenseCategoryDeleted(id, moveToCategoryId);
-      setExpenseCategoryOrder((prev) => prev.filter((x) => x !== id));
+      setExpenseCategoryOrder((prev) => {
+        const next = prev.filter((x) => x !== id);
+        if (authLoading || !session || !user?.id || !isValidHouseholdCode(householdId)) {
+          return next;
+        }
+        queueMicrotask(() =>
+          void persistDataEntryCategoryLayout(next, incomeCategoryOrderRef.current),
+        );
+        return next;
+      });
     },
-    [householdId, mergeBudgetOnExpenseCategoryDeleted],
+    [
+      authLoading,
+      householdId,
+      mergeBudgetOnExpenseCategoryDeleted,
+      persistDataEntryCategoryLayout,
+      session,
+      user?.id,
+    ],
   );
 
-  const reorderExpenseCategories = useCallback((orderedIds: string[]) => {
-    setExpenseCategoryOrder(orderedIds);
-  }, []);
+  const reorderExpenseCategories = useCallback(
+    (orderedIds: string[]) => {
+      setExpenseCategoryOrder(orderedIds);
+      if (authLoading || !session || !user?.id || !isValidHouseholdCode(householdId)) return;
+      void persistDataEntryCategoryLayout(orderedIds, incomeCategoryOrderRef.current);
+    },
+    [authLoading, householdId, persistDataEntryCategoryLayout, session, user?.id],
+  );
 
   const addIncomeSource = useCallback((name: string, iconKey?: string, color?: string) => {
     const trimmed = name.trim();
@@ -2807,7 +3025,13 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
                 ),
               );
             }
-            setIncomeCategoryOrder((prev) => prev.filter((x) => x !== id));
+            setIncomeCategoryOrder((prev) => {
+              const next = prev.filter((x) => x !== id);
+              queueMicrotask(() =>
+                void persistDataEntryCategoryLayout(expenseCategoryOrderRef.current, next),
+              );
+              return next;
+            });
             setTimeout(() => {
               isDeletingRef.current = false;
             }, 0);
@@ -2825,14 +3049,28 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
           ),
         );
       }
-      setIncomeCategoryOrder((prev) => prev.filter((x) => x !== id));
+      setIncomeCategoryOrder((prev) => {
+        const next = prev.filter((x) => x !== id);
+        if (authLoading || !session || !user?.id || !isValidHouseholdCode(householdId)) {
+          return next;
+        }
+        queueMicrotask(() =>
+          void persistDataEntryCategoryLayout(expenseCategoryOrderRef.current, next),
+        );
+        return next;
+      });
     },
-    [householdId],
+    [authLoading, householdId, persistDataEntryCategoryLayout, session, user?.id],
   );
 
-  const reorderIncomeSources = useCallback((orderedIds: string[]) => {
-    setIncomeCategoryOrder(orderedIds);
-  }, []);
+  const reorderIncomeSources = useCallback(
+    (orderedIds: string[]) => {
+      setIncomeCategoryOrder(orderedIds);
+      if (authLoading || !session || !user?.id || !isValidHouseholdCode(householdId)) return;
+      void persistDataEntryCategoryLayout(expenseCategoryOrderRef.current, orderedIds);
+    },
+    [authLoading, householdId, persistDataEntryCategoryLayout, session, user?.id],
+  );
 
   const setQuickAccessCount = useCallback(
     (count: number) => {
@@ -2852,9 +3090,12 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
           return;
         }
         setQuickAccessCountState(next);
+        if (isValidHouseholdCode(householdId)) {
+          writeDataEntryLayoutCache(user.id, householdId, { categoryDisplayLimit: next });
+        }
       })();
     },
-    [authLoading, quickAccessCount, session, user?.id],
+    [authLoading, householdId, quickAccessCount, session, user?.id],
   );
 
   const addPaymentMethod = useCallback((name: string, iconKey?: string, color?: string) => {
@@ -3153,8 +3394,6 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
     try {
       localStorage.removeItem(STORAGE_DELETED_BUILTIN_EXPENSE_CATS);
       localStorage.removeItem(STORAGE_DELETED_BUILTIN_INCOME_CATS);
-      localStorage.removeItem(STORAGE_EXPENSE_CATEGORY_ORDER);
-      localStorage.removeItem(STORAGE_INCOME_CATEGORY_ORDER);
     } catch {
       /* ignore */
     }
@@ -3210,8 +3449,6 @@ export function ExpensesProvider({ children }: { children: ReactNode }) {
       }
       localStorage.removeItem(STORAGE_DELETED_BUILTIN_EXPENSE_CATS);
       localStorage.removeItem(STORAGE_DELETED_BUILTIN_INCOME_CATS);
-      localStorage.removeItem(STORAGE_EXPENSE_CATEGORY_ORDER);
-      localStorage.removeItem(STORAGE_INCOME_CATEGORY_ORDER);
     } catch { /* ignore */ }
     try {
       const idbWithList = indexedDB as unknown as {

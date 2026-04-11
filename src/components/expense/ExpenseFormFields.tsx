@@ -21,7 +21,6 @@ import {
 import { CSS } from "@dnd-kit/utilities";
 import { DatePickerField } from "@/components/expense/DatePickerField";
 import { CategoryGlyph, CurrencyGlyph } from "@/components/expense/FinanceGlyphs";
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import {
   Dialog,
   DialogContent,
@@ -42,11 +41,11 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Textarea } from "@/components/ui/textarea";
 import type { Category, CurrencyDef, EntryType, PaymentMethod } from "@/data/mock";
 import { useI18n } from "@/context/I18nContext";
 import { currencyOptionLabel, formatIls } from "@/lib/format";
 import { ColorBadge } from "./ColorBadge";
+import { NoteCombobox } from "./NoteCombobox";
 import { useExpenses } from "@/context/ExpensesContext";
 import { useAuth } from "@/context/AuthContext";
 import {
@@ -62,6 +61,87 @@ const ADD_CATEGORY = "__add_category__";
 const ADD_METHOD = "__add_method__";
 const MANAGE_METHOD = "__manage_method__";
 const ADD_CURRENCY = "__add_currency__";
+
+function InstallmentsRecurringRow({
+  idPrefix,
+  entryType,
+  installments,
+  onInstallmentsChange,
+  recurringMonthly,
+  onRecurringMonthlyChange,
+  installmentPreview,
+  installmentCountLabel,
+  recurringLabel,
+}: {
+  idPrefix: string;
+  entryType: EntryType;
+  installments: number;
+  onInstallmentsChange?: (v: number) => void;
+  recurringMonthly: boolean;
+  onRecurringMonthlyChange?: (v: boolean) => void;
+  installmentPreview: string | null;
+  installmentCountLabel: string;
+  recurringLabel: string;
+}) {
+  const showInstallments =
+    entryType === "expense" && !!onInstallmentsChange && !recurringMonthly;
+  const showRecurring = !!onRecurringMonthlyChange;
+  if (!showInstallments && !showRecurring) return null;
+
+  const installmentsGroup = showInstallments ? (
+    <div className="flex min-w-0 flex-row flex-wrap items-center gap-3">
+      <span className="whitespace-nowrap text-sm text-muted-foreground">
+        {installmentCountLabel}
+      </span>
+      <Input
+        id={`${idPrefix}-installments`}
+        type="number"
+        inputMode="numeric"
+        min={1}
+        step={1}
+        value={String(Math.max(1, Math.floor(installments)))}
+        onChange={(e) =>
+          onInstallmentsChange?.(Math.max(1, Number(e.target.value || 1)))
+        }
+        dir="ltr"
+        className="h-9 w-[4.5rem] shrink-0 rounded-md border border-input bg-background px-2 py-1 text-center text-sm tabular-nums shadow-sm focus-visible:ring-1 focus-visible:ring-ring/40"
+      />
+      {installmentPreview ? (
+        <span className="min-w-0 text-sm text-muted-foreground">{installmentPreview}</span>
+      ) : null}
+    </div>
+  ) : null;
+
+  const recurringGroup = showRecurring ? (
+    <div className="flex shrink-0 items-center gap-2">
+      <span className="whitespace-nowrap text-sm text-muted-foreground">{recurringLabel}</span>
+      <Switch
+        id={`${idPrefix}-recurring`}
+        checked={recurringMonthly}
+        onCheckedChange={(v: boolean) => {
+          const next = Boolean(v);
+          onRecurringMonthlyChange?.(next);
+          if (next && onInstallmentsChange) onInstallmentsChange(1);
+        }}
+      />
+    </div>
+  ) : null;
+
+  return (
+    <div
+      className={cn(
+        "flex w-full flex-row flex-wrap items-center gap-6",
+        showInstallments && showRecurring && "justify-between",
+        !showInstallments && showRecurring && "justify-end",
+      )}
+    >
+      {showInstallments ? (
+        <div className="min-w-0 flex-1">{installmentsGroup}</div>
+      ) : null}
+      {recurringGroup}
+    </div>
+  );
+}
 
 function SortableGridCategoryTile({
   id,
@@ -434,39 +514,21 @@ export function ExpenseFormFields({
     currencyMeta.symbol,
   ]);
 
-  const noteSuggestions = useMemo(() => {
+  /** Up to 5 most recent unique notes (expenses are date-desc from server). */
+  const noteRecentSuggestions = useMemo(() => {
     const seen = new Set<string>();
+    const out: string[] = [];
     for (const e of expenses) {
       const n = e.note.trim();
-      if (!n) continue;
+      if (!n || seen.has(n)) continue;
       seen.add(n);
+      out.push(n);
+      if (out.length >= 5) break;
     }
-    // Keep UI stable and nice for Hebrew search.
-    return [...seen].sort((a, b) => a.localeCompare(b, "he"));
+    return out;
   }, [expenses]);
 
-  const [notesOpen, setNotesOpen] = useState(false);
   const [allCategoriesOpen, setAllCategoriesOpen] = useState(false);
-
-  const filteredNoteSuggestions = useMemo(() => {
-    const q = note.trim();
-    if (!q) return [];
-    const qn = q.toLowerCase();
-
-    const startsWith: string[] = [];
-    const includes: string[] = [];
-    for (const s of noteSuggestions) {
-      const sn = s.toLowerCase();
-      if (sn.startsWith(qn)) startsWith.push(s);
-      else if (sn.includes(qn)) includes.push(s);
-      if (startsWith.length + includes.length >= 8) break;
-    }
-    return [...startsWith, ...includes].slice(0, 8);
-  }, [note, noteSuggestions]);
-
-  const showNoteDropdown = notesOpen && filteredNoteSuggestions.length > 0;
-  const [notePopoverOpen, setNotePopoverOpen] = useState(false);
-  const [installmentsOpen, setInstallmentsOpen] = useState(false);
 
   function onCategoryChange(value: string) {
     if (value === ADD_CATEGORY) {
@@ -521,24 +583,6 @@ export function ExpenseFormFields({
     : "";
   const monoRowMuted = "text-muted-foreground";
   const monoRowValue = "text-foreground";
-
-  const Row = ({
-    children,
-    className,
-  }: {
-    children: React.ReactNode;
-    className?: string;
-  }) => (
-    <div
-      className={cn(
-        "flex w-full min-h-[3.5rem] items-center justify-between gap-3 text-base leading-relaxed",
-        rowPad,
-        className,
-      )}
-    >
-      {children}
-    </div>
-  );
 
   if (layout === "list") {
     const renderCategoryGrid = categoryPicker === "grid";
@@ -979,182 +1023,46 @@ export function ExpenseFormFields({
         </Select>
         {!entryMono ? <div className="h-px w-full bg-border/70" /> : null}
 
-        {entryType === "expense" && onInstallmentsChange && !recurringMonthly ? (
-          <>
-            <Popover open={installmentsOpen} onOpenChange={setInstallmentsOpen}>
-              <PopoverTrigger asChild>
-                <button
-                  type="button"
-                  className="w-full text-start"
-                  onClick={() => setInstallmentsOpen(true)}
-                >
-                  <Row>
-                    <div className={cn("flex min-w-0 items-center gap-2", monoRowMuted)}>
-                      <span className="size-4 shrink-0 rounded-sm border border-border/70 bg-muted/40" />
-                      <span className="truncate">{t.installments}</span>
-                    </div>
-                    <div className={cn("min-w-0 truncate", monoRowValue)}>
-                      <span dir="ltr" className="tabular-nums">
-                        {String(Math.floor(installments))}
-                      </span>
-                    </div>
-                  </Row>
-                </button>
-              </PopoverTrigger>
-              <PopoverContent
-                className="w-auto min-w-[14rem] p-4"
-                align="end"
-                dir={dir}
-              >
-                <div className="space-y-3">
-                  <div className="flex flex-wrap items-end gap-x-3 gap-y-1">
-                    <div className="flex items-stretch overflow-hidden rounded-xl border border-input bg-background">
-                      <button
-                        type="button"
-                        className="px-3 text-muted-foreground hover:text-foreground"
-                        onClick={() =>
-                          onInstallmentsChange(Math.max(1, Math.floor(installments) - 1))
-                        }
-                        aria-label={t.decrementInstallments}
-                      >
-                        −
-                      </button>
-                      <div
-                        id={`${idPrefix}-installments`}
-                        dir="ltr"
-                        className="flex w-[6.5rem] items-center justify-center tabular-nums text-base leading-relaxed"
-                      >
-                        {Math.max(1, Math.floor(installments))}
-                      </div>
-                      <button
-                        type="button"
-                        className="px-3 text-muted-foreground hover:text-foreground"
-                        onClick={() =>
-                          onInstallmentsChange(Math.max(1, Math.floor(installments) + 1))
-                        }
-                        aria-label={t.incrementInstallments}
-                      >
-                        +
-                      </button>
-                    </div>
-                  </div>
-                  <Button
-                    type="button"
-                    size="sm"
-                    className="w-full"
-                    onClick={() => setInstallmentsOpen(false)}
-                  >
-                    אישור
-                  </Button>
-                </div>
-              </PopoverContent>
-            </Popover>
-            {!entryMono ? <div className="h-px w-full bg-border/70" /> : null}
-          </>
-        ) : null}
-
-        {onRecurringMonthlyChange ? (
-          <>
-            <Row>
-              <span className={cn("text-base leading-relaxed", monoRowMuted)}>
-                {entryType === "income" ? t.recurringIncome : t.recurringExpense}
-              </span>
-              <Switch
-                id={`${idPrefix}-recurring`}
-                checked={recurringMonthly}
-                onCheckedChange={(v: boolean) => {
-                  const next = Boolean(v);
-                  onRecurringMonthlyChange(next);
-                  if (next && onInstallmentsChange) onInstallmentsChange(1);
-                }}
-              />
-            </Row>
-            {!entryMono ? <div className="h-px w-full bg-border/70" /> : null}
-          </>
-        ) : null}
-
-        <Popover open={notePopoverOpen} onOpenChange={setNotePopoverOpen}>
-          <PopoverTrigger asChild>
-            <button
-              type="button"
-              className="w-full text-start"
-              onClick={() => setNotePopoverOpen(true)}
-            >
-              <Row>
-                <div className={cn("flex min-w-0 items-center gap-2", monoRowMuted)}>
-                  <span className="size-4 shrink-0 rounded-sm border border-border/70 bg-muted/40" />
-                  <span className="truncate">{t.note}</span>
-                </div>
-                <div className={cn("min-w-0 truncate", monoRowValue)}>
-                  {note.trim() ? note.trim() : t.notePlaceholder}
-                </div>
-              </Row>
-            </button>
-          </PopoverTrigger>
-          <PopoverContent
-            className="w-[min(92vw,26rem)] p-5"
-            align="end"
-            dir={dir}
-          >
-            <div className="flex flex-col gap-4">
-              <Label htmlFor={`${idPrefix}-note`}>{t.note}</Label>
-              <div className="relative">
-                <Textarea
-                  id={`${idPrefix}-note`}
-                  placeholder={t.notePlaceholder}
-                  value={note}
-                  onChange={(e) => onNoteChange(e.target.value)}
-                  rows={4}
-                  className="min-h-[6.5rem]"
-                  onFocus={() => setNotesOpen(true)}
-                  onBlur={() => setNotesOpen(false)}
-                  autoFocus
-                />
-                {showNoteDropdown ? (
-                  <div
-                    className="absolute left-0 right-0 top-full z-[100000] mt-1.5 rounded-2xl border border-muted/30 bg-popover p-2 shadow-xl animate-in fade-in-0 zoom-in-95"
-                    dir={dir}
-                  >
-                    <div className="max-h-56 space-y-1 overflow-auto">
-                      {filteredNoteSuggestions.map((s) => (
-                        <button
-                          key={s}
-                          type="button"
-                          className="w-full rounded-xl px-4 py-3 text-start text-base leading-relaxed text-foreground transition-colors hover:bg-accent/50 focus-visible:bg-accent/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                          onMouseDown={(e) => {
-                            e.preventDefault();
-                            onNoteChange(s);
-                            setNotesOpen(false);
-                            setNotePopoverOpen(false);
-                          }}
-                        >
-                          {s}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                ) : null}
-              </div>
-              <Button
-                type="button"
-                className="mt-1 w-full"
-                onClick={() => setNotePopoverOpen(false)}
-              >
-                אישור
-              </Button>
-            </div>
-          </PopoverContent>
-        </Popover>
-        {entryNotesExtra ? (
-          <div
-            className={cn(
-              "mt-4",
-              entryMono && "border-t border-border pt-4",
-            )}
-          >
-            {entryNotesExtra}
+        <div
+          className={cn(
+            "flex flex-col gap-4 py-2",
+            entryMono ? "px-0" : "px-5",
+          )}
+        >
+          <div className="flex w-full flex-row items-center gap-3">
+            <span className="whitespace-nowrap text-sm text-muted-foreground">
+              {t.noteInlineLabel}
+            </span>
+            <NoteCombobox
+              id={`${idPrefix}-note`}
+              value={note}
+              onChange={onNoteChange}
+              suggestions={noteRecentSuggestions}
+              placeholder={t.noteShortPlaceholder}
+            />
           </div>
-        ) : null}
+
+          <InstallmentsRecurringRow
+            idPrefix={idPrefix}
+            entryType={entryType}
+            installments={installments}
+            onInstallmentsChange={onInstallmentsChange}
+            recurringMonthly={recurringMonthly}
+            onRecurringMonthlyChange={onRecurringMonthlyChange}
+            installmentPreview={installmentPreview}
+            installmentCountLabel={t.installmentCountLabel}
+            recurringLabel={
+              entryType === "income" ? t.recurringIncome : t.recurringExpense
+            }
+          />
+          {entryNotesExtra ? (
+            <div
+              className={cn(entryMono && "border-t border-border pt-4")}
+            >
+              {entryNotesExtra}
+            </div>
+          ) : null}
+        </div>
       </div>
     );
   }
@@ -1364,83 +1272,33 @@ export function ExpenseFormFields({
         </Select>
       </div>
 
-      {entryType === "expense" && onInstallmentsChange ? (
-        <div className="w-full box-border space-y-2">
-          <Label htmlFor={`${idPrefix}-installments`}>{t.installments}</Label>
-          <div className="flex flex-wrap items-end gap-x-3 gap-y-1">
-            <Input
-              id={`${idPrefix}-installments`}
-              type="number"
-              inputMode="numeric"
-              min={1}
-              step={1}
-              value={String(installments)}
-              onChange={(e) =>
-                onInstallmentsChange(Math.max(1, Number(e.target.value || 1)))
-              }
-              dir="ltr"
-              className="max-w-[8rem] tabular-nums"
-            />
-            {installmentPreview ? (
-              <p className="pb-2 text-sm text-muted-foreground">{installmentPreview}</p>
-            ) : null}
-          </div>
-        </div>
-      ) : null}
-
-      {onRecurringMonthlyChange ? (
-        <label
-          htmlFor={`${idPrefix}-recurring`}
-          className="flex min-h-[3.5rem] w-full items-center justify-between gap-3 rounded-xl border border-border px-5 py-4"
-        >
-          <span className="text-sm">
-            {entryType === "income" ? t.recurringIncome : t.recurringExpense}
+      <div className="flex w-full flex-col gap-4 py-2">
+        <div className="flex w-full flex-row items-center gap-3">
+          <span className="whitespace-nowrap text-sm text-muted-foreground">
+            {t.noteInlineLabel}
           </span>
-          <Switch
-            id={`${idPrefix}-recurring`}
-            checked={recurringMonthly}
-            onCheckedChange={(v: boolean) => onRecurringMonthlyChange(Boolean(v))}
-          />
-        </label>
-      ) : null}
-
-      <div className="w-full box-border space-y-2">
-        <Label htmlFor={`${idPrefix}-note`}>{t.note}</Label>
-        <div className="relative">
-          <Textarea
-            id={`${idPrefix}-note`}
-            placeholder={t.notePlaceholder}
+          <NoteCombobox
+            id={`${idPrefix}-note-form`}
             value={note}
-            onChange={(e) => onNoteChange(e.target.value)}
-            rows={4}
-            onFocus={() => setNotesOpen(true)}
-            onBlur={() => setNotesOpen(false)}
+            onChange={onNoteChange}
+            suggestions={noteRecentSuggestions}
+            placeholder={t.noteShortPlaceholder}
           />
-          {showNoteDropdown ? (
-            <div
-              className="absolute left-0 right-0 top-full z-[100000] mt-1.5 rounded-2xl border border-muted/30 bg-popover p-2 shadow-xl animate-in fade-in-0 zoom-in-95"
-              dir={dir}
-            >
-              <div className="max-h-56 space-y-1 overflow-auto">
-                {filteredNoteSuggestions.map((s) => (
-                  <button
-                    key={s}
-                    type="button"
-                    className="w-full rounded-xl px-4 py-3 text-start text-base leading-relaxed text-foreground transition-colors hover:bg-accent/50 focus-visible:bg-accent/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                    onMouseDown={(e) => {
-                      // Prevent textarea blur before click applies.
-                      e.preventDefault();
-                      onNoteChange(s);
-                      setNotesOpen(false);
-                    }}
-                  >
-                    {s}
-                  </button>
-                ))}
-              </div>
-            </div>
-          ) : null}
         </div>
+
+        <InstallmentsRecurringRow
+          idPrefix={idPrefix}
+          entryType={entryType}
+          installments={installments}
+          onInstallmentsChange={onInstallmentsChange}
+          recurringMonthly={recurringMonthly}
+          onRecurringMonthlyChange={onRecurringMonthlyChange}
+          installmentPreview={installmentPreview}
+          installmentCountLabel={t.installmentCountLabel}
+          recurringLabel={
+            entryType === "income" ? t.recurringIncome : t.recurringExpense
+          }
+        />
       </div>
     </div>
   );

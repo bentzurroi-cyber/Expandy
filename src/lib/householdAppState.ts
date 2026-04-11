@@ -5,6 +5,12 @@ export const APP_STATE_KEYS = {
   budgetsByMonth: "budgets_by_month",
   deletedBuiltinExpenseCategoryIds: "deleted_builtin_expense_category_ids",
   deletedBuiltinIncomeCategoryIds: "deleted_builtin_income_category_ids",
+  /**
+   * Per-user Data Entry (הזנה) layout: drag order of category tiles, scoped by household.
+   * Value: Record<householdCode, { expense: string[]; income: string[] }>
+   * (category ids only; no DB changes on shared categories).
+   */
+  dataEntryCategoryLayoutByHousehold: "data_entry_category_layout_by_hh",
 } as const;
 
 export type HouseholdAppState = Record<string, unknown>;

@@ -18,8 +18,6 @@ export const EXPANDY_APP_DATA_STORAGE_KEYS = [
   "expandy-category-budgets-v1",
   "expandy-deleted-builtin-expense-cats-v1",
   "expandy-deleted-builtin-income-cats-v1",
-  "expandy-expense-category-order-v1",
-  "expandy-income-category-order-v1",
   "expandy-quick-access-count-v1",
 ] as const;
 
